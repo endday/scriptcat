@@ -1,6 +1,8 @@
-export const ExtVersion = "0.10.0-beta.2";
+import { version } from "../../package.json";
 
-export const Server = "https://sc.icodef.com/";
+export const ExtVersion = version;
+
+export const ExtServer = "https://ext.scriptcat.org/";
 
 export const ExternalWhitelist = [
   "greasyfork.org",

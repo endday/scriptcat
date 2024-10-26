@@ -17,6 +17,7 @@ import { SystemConfig } from "./pkg/config/config";
 import SystemManager from "./app/service/system/manager";
 import SynchronizeManager from "./app/service/synchronize/manager";
 import SubscribeManager from "./app/service/subscribe/manager";
+import "@App/locales/locales";
 
 // 数据库初始化
 migrate();
@@ -28,12 +29,10 @@ const loggerCore = new LoggerCore({
 });
 
 loggerCore.logger().debug("background start");
-// 沙盒通讯
-// eslint-disable-next-line no-undef
-const sandboxConnect = new MessageSandbox(sandbox);
 // 通讯中心
 const center = new MessageCenter();
 center.start();
+
 IoC.registerInstance(MessageCenter, center).alias([
   MessageHander,
   MessageBroadcast,
@@ -41,35 +40,38 @@ IoC.registerInstance(MessageCenter, center).alias([
 // 监听logger messagewriter
 ListenerMessage(new LoggerDAO(), center);
 
-IoC.instance(SystemConfig).init();
+(IoC.instance(SystemConfig) as SystemConfig).init();
 
-IoC.instance(SystemManager).init();
+(IoC.instance(SystemManager) as SystemManager).init();
+// 资源管理器
+const resourceManager = new ResourceManager(center);
+// value管理器
+const valueManager = new ValueManager(center, center);
+const runtime = new Runtime(center, resourceManager, valueManager);
+IoC.registerInstance(Runtime, runtime);
+// 脚本后台处理器
+runtime.start();
+// 值后台处理器
+valueManager.start();
+// 资源后台处理器
+resourceManager.start();
+(IoC.instance(ScriptManager) as ScriptManager).start();
+(IoC.instance(SubscribeManager) as SubscribeManager).start();
+// 同步处理器
+(IoC.instance(SynchronizeManager) as SynchronizeManager).start();
 
-// 等待沙盒启动后再进行后续的步骤
-const sandboxOnload = () => {
-  // 资源管理器
-  const resourceManager = new ResourceManager(center);
-  // value管理器
-  const valueManager = new ValueManager(center, center);
-  const runtime = new Runtime(
-    center,
-    sandboxConnect,
-    resourceManager,
-    valueManager
-  );
-  IoC.registerInstance(Runtime, runtime);
-  // 脚本后台处理器
-  runtime.start();
-  // 值后台处理器
-  valueManager.start();
-  (IoC.instance(ScriptManager) as ScriptManager).start();
-  (IoC.instance(SubscribeManager) as SubscribeManager).start();
-  // 同步处理器
-  IoC.instance(SynchronizeManager).start();
-  return Promise.resolve(true);
+// 监听沙盒加载
+window.onload = () => {
+  // 沙盒通讯
+  // eslint-disable-next-line no-undef
+  const sandboxConnect = new MessageSandbox(sandbox);
+  runtime.startSandbox(sandboxConnect);
+  // eslint-disable-next-line no-undef
+  center.setSandbox(sandbox);
 };
-
-center.setHandler("sandboxOnload", sandboxOnload);
+center.setHandler("sandboxOnload", () => {
+  return Promise.resolve(true);
+});
 // 启动gm api的监听
 const gm = new GMApi(center, new PermissionVerify());
 gm.start();

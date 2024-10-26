@@ -1,4 +1,5 @@
 export interface File {
+  fsid?: number;
   // 文件名
   name: string;
   // 文件路径
@@ -13,9 +14,10 @@ export interface File {
   updatetime: number;
 }
 
+type ReadType = "string" | "blob";
 export interface FileReader {
   // 读取文件内容
-  read<T extends "string" | "blob">(type?: T): Promise<string | Blob>;
+  read(type?: ReadType): Promise<any>;
 }
 
 export interface FileWriter {
@@ -30,7 +32,7 @@ export default interface FileSystem {
   // 授权验证
   verify(): Promise<void>;
   // 打开文件
-  open(path: string): Promise<FileReader>;
+  open(file: File): Promise<FileReader>;
   // 打开目录
   openDir(path: string): Promise<FileSystem>;
   // 创建文件
@@ -40,5 +42,7 @@ export default interface FileSystem {
   // 删除文件
   delete(path: string): Promise<void>;
   // 文件列表
-  list(path?: string): Promise<File[]>;
+  list(): Promise<File[]>;
+  // getDirUrl 获取目录的url
+  getDirUrl(): Promise<string>;
 }

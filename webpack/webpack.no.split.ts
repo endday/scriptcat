@@ -12,7 +12,6 @@ const dist = `${__dirname}/../dist`;
 // 不要分割的文件
 common.entry = {
   content: `${src}/content.ts`,
-  inject: `${src}/inject.ts`,
   "editor.worker": "monaco-editor/esm/vs/editor/editor.worker.js",
   "ts.worker": "monaco-editor/esm/vs/language/typescript/ts.worker.js",
 };
@@ -40,7 +39,8 @@ export default merge(common, {
   plugins: [
     // firefox商店文件不能大于4M, 所以需要压缩
     new CompressionPlugin({
-      test: /ts.worker.js/,
+      test: /ts.worker.js$/,
+      filename: () => "ts.worker.js",
       deleteOriginalAssets: true,
     }),
   ],

@@ -1,5 +1,4 @@
 /* eslint-disable camelcase */
-import { Metadata } from "@App/app/repo/scripts";
 
 export type ResourceMeta = {
   name: string;
@@ -10,12 +9,14 @@ export type ResourceMeta = {
 
 export type ResourceBackup = {
   meta: ResourceMeta;
+  // text数据
   source?: string;
+  // 二进制数据
   base64: string;
 };
 
 export type ValueStorage = {
-  data: { [key: string]: string };
+  data: { [key: string]: any };
   ts: number;
 };
 
@@ -50,7 +51,8 @@ export type ScriptOptions = {
 
 export type ScriptMeta = {
   name: string;
-  uuid?: string;
+  uuid: string; // 此uuid是对tm的兼容处理
+  sc_uuid: string; // 脚本猫uuid
   modified: number;
   file_url: string;
   subscribe_url?: string;
@@ -74,6 +76,8 @@ export type ScriptBackupData = {
   requires: ResourceBackup[];
   requiresCss: ResourceBackup[];
   resources: ResourceBackup[];
+  // 为了兼容暴力猴而设置的字段
+  enabled?: boolean;
 };
 
 export type SubscribeScript = {

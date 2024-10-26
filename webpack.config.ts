@@ -82,6 +82,7 @@ const config: Configuration = {
         removeComments: true,
       },
       chunks: ["background"],
+      scriptLoading: "blocking",
     }),
     new HtmlWebpackPlugin({
       filename: `${dist}/ext/src/confirm.html`,
@@ -108,9 +109,8 @@ const config: Configuration = {
     }),
     new CopyPlugin({
       patterns: [
-        { from: `${src}/manifest.json`, to: `${dist}/ext` },
         { from: `${assets}/_locales`, to: `${dist}/ext/_locales` },
-        { from: `${assets}/logo.png`, to: `${dist}/ext/assets` },
+        { from: `${assets}/logo`, to: `${dist}/ext/assets/logo` },
       ],
     }),
     new CleanWebpackPlugin(),
@@ -125,7 +125,7 @@ const config: Configuration = {
     }),
   ],
   resolve: {
-    extensions: [".js", ".ts", ".tsx", ".d.ts", ".tpl"],
+    extensions: [".js", ".ts", ".tsx", ".d.ts", ".tpl", ".json"],
     alias: {
       "@App": path.resolve(__dirname, "src/"),
       "@Pkg": path.resolve(__dirname, "pkg/"),
@@ -146,6 +146,11 @@ const config: Configuration = {
         test: /\.d\.ts$/,
         use: ["raw-loader"],
         exclude: /node_modules/,
+      },
+      {
+        test: /inject\.js$/,
+        use: ["raw-loader"],
+        include: /dist/,
       },
       {
         test: /\.tpl$/,

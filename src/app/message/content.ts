@@ -1,3 +1,4 @@
+import LoggerCore from "../logger/core";
 import { Channel } from "./channel";
 import {
   ChannelManager,
@@ -23,6 +24,8 @@ export default class MessageContent
 
   channelManager: ChannelManager;
 
+  relatedTarget: Map<number, Element>;
+
   constructor(eventId: string, isContent: boolean) {
     super();
     this.eventId = eventId;
@@ -30,9 +33,14 @@ export default class MessageContent
     this.channelManager = new WarpChannelManager((data) => {
       this.nativeSend(data);
     });
-    document.addEventListener(
+    this.relatedTarget = new Map<number, Element>();
+    window.addEventListener(
       (isContent ? "ct" : "fd") + eventId,
       (event: unknown) => {
+        if (event instanceof MouseEvent) {
+          this.relatedTarget.set(event.clientX, <Element>event.relatedTarget);
+          return;
+        }
         const message = (<
           {
             detail: {
@@ -44,7 +52,9 @@ export default class MessageContent
             };
           }
         >event).detail;
-        this.handler(message, this.channelManager, { targetTag: "content" });
+        this.handler(message, this.channelManager, {
+          targetTag: "content",
+        });
       }
     );
     if (!MessageContent.instance) {
@@ -75,21 +85,57 @@ export default class MessageContent
     return channel.syncSend(action, data);
   }
 
+  // content与inject通讯为阻塞可以实现真同步,使用回调的方式返回参数
+  sendCallback(action: string, data: any, callback: (resp: any) => void) {
+    const channel = this.channelManager.channel();
+    channel.handler = callback;
+    this.nativeSend({
+      action,
+      data,
+      stream: channel.flag,
+      channel: false,
+    });
+  }
+
+  getAndDelRelatedTarget(id: number) {
+    const target = this.relatedTarget.get(id);
+    this.relatedTarget.delete(id);
+    return target;
+  }
+
   nativeSend(data: any): void {
     let detail = data;
+
+    // 特殊处理relatedTarget
+    if (detail.data && typeof detail.data.relatedTarget === "object") {
+      // 先将relatedTarget转换成id发送过去
+      const target = detail.data.relatedTarget;
+      delete detail.data.relatedTarget;
+      detail.data.relatedTarget = Math.ceil(Math.random() * 1000000);
+      // 可以使用此种方式交互element
+      const ev = new MouseEvent((this.isContent ? "fd" : "ct") + this.eventId, {
+        clientX: detail.data.relatedTarget,
+        relatedTarget: target,
+      });
+      window.dispatchEvent(ev);
+    }
+
     if (typeof cloneInto !== "undefined") {
       try {
+        LoggerCore.getLogger().info("nativeSend");
         // eslint-disable-next-line no-undef
         detail = cloneInto(detail, document.defaultView);
       } catch (e) {
         // eslint-disable-next-line no-console
         console.log(e);
+        LoggerCore.getLogger().info("error data");
       }
     }
+
     const ev = new CustomEvent((this.isContent ? "fd" : "ct") + this.eventId, {
       detail,
     });
-    document.dispatchEvent(ev);
+    window.dispatchEvent(ev);
   }
 
   public send(action: string, data: any) {

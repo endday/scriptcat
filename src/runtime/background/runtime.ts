@@ -10,6 +10,8 @@ import {
   SCRIPT_TYPE_NORMAL,
   ScriptDAO,
   ScriptRunResouce,
+  SCRIPT_RUN_STATUS_RUNNING,
+  Metadata,
 } from "@App/app/repo/scripts";
 import ResourceManager from "@App/app/service/resource/manager";
 import ValueManager from "@App/app/service/value/manager";
@@ -25,6 +27,7 @@ import { Channel } from "@App/app/message/channel";
 import IoC from "@App/app/ioc";
 import Manager from "@App/app/service/manager";
 import Hook from "@App/app/service/hook";
+import { i18nName } from "@App/locales/locales";
 import { compileInjectScript, compileScriptCode } from "../content/utils";
 import GMApi, { Request } from "./gm_api";
 import { genScriptMenu } from "./utils";
@@ -45,14 +48,18 @@ export type ScriptMenu = {
   enable: boolean;
   updatetime: number;
   hasUserConfig: boolean;
+  metadata: Metadata;
   runStatus?: SCRIPT_RUN_STATUS;
+  runNum: number;
+  runNumByIframe: number;
   menus?: ScriptMenuItem[];
+  customExclude?: string[];
 };
 
 // 后台脚本将会将代码注入到沙盒中
-@IoC.Singleton(MessageHander, MessageSandbox, ResourceManager, ValueManager)
+@IoC.Singleton(MessageHander, ResourceManager, ValueManager)
 export default class Runtime extends Manager {
-  messageSandbox: MessageSandbox;
+  messageSandbox?: MessageSandbox;
 
   scriptDAO: ScriptDAO;
 
@@ -62,26 +69,27 @@ export default class Runtime extends Manager {
 
   logger: Logger;
 
-  scriptFlag: string;
-
   match: UrlMatch<ScriptRunResouce> = new UrlMatch();
 
   include: UrlInclude<ScriptRunResouce> = new UrlInclude();
 
+  // 自定义排除
+  customizeExclude: UrlMatch<ScriptRunResouce> = new UrlMatch();
+
   static hook = new Hook<"runStatus">();
+
+  // 运行中和开启的后台脚本
+  runBackScript: Map<number, Script> = new Map();
 
   constructor(
     message: MessageHander,
-    messageSandbox: MessageSandbox,
     resourceManager: ResourceManager,
     valueManager: ValueManager
   ) {
     super(message, "runtime");
     this.scriptDAO = new ScriptDAO();
-    this.messageSandbox = messageSandbox;
     this.resourceManager = resourceManager;
     this.valueManager = valueManager;
-    this.scriptFlag = randomString(8);
     this.logger = LoggerCore.getInstance().logger({ component: "runtime" });
     ScriptManager.hook.addListener("upsert", this.scriptUpdate.bind(this));
     ScriptManager.hook.addListener("delete", this.scriptDelete.bind(this));
@@ -126,33 +134,29 @@ export default class Runtime extends Manager {
     // 监听脚本运行状态
     this.listenScriptRunStatus();
 
-    // 运行中和开启的后台脚本
-    const runBackScript: Map<number, Script> = new Map();
+    // 启动普通脚本
     this.scriptDAO.table.toArray((items) => {
       items.forEach((item) => {
+        // 容错处理
+        if (!item) {
+          this.logger.error("script is null");
+          return;
+        }
+        if (item.type !== SCRIPT_TYPE_NORMAL) {
+          return;
+        }
         // 加载所有的脚本
         if (item.status === SCRIPT_STATUS_ENABLE) {
           this.enable(item);
-          if (item.type !== SCRIPT_TYPE_NORMAL) {
-            runBackScript.set(item.id, item);
-          }
-        } else if (item.type === SCRIPT_TYPE_NORMAL) {
+        } else {
           // 只处理未开启的普通页面脚本
           this.disable(item);
         }
       });
     });
+
     // 接受消息,注入脚本
     // 获取注入源码
-    const { scriptFlag } = this;
-    let injectedSource = "";
-    fetch(chrome.runtime.getURL("src/inject.js"))
-      .then((resp) => resp.text())
-      .then((source: string) => {
-        injectedSource = dealScript(
-          `(function (ScriptFlag) {\n${source}\n})('${scriptFlag}')`
-        );
-      });
 
     // 监听菜单创建
     const scriptMenu: Map<
@@ -186,7 +190,7 @@ export default class Runtime extends Manager {
           tabMap.set(request.scriptId, menuArr);
         }
         // 查询菜单是否已经存在
-        for (let i = 0; menuArr.length; i += 1) {
+        for (let i = 0; i < menuArr.length; i += 1) {
           // id 相等 跳过,选第一个,并close链接
           if (menuArr[i].request.params[0] === request.params[0]) {
             channel.disChannel();
@@ -221,7 +225,7 @@ export default class Runtime extends Manager {
             tabMap.delete(request.scriptId);
           }
         }
-        if (!Object.keys(tabMap).length) {
+        if (!tabMap.size) {
           scriptMenu.delete(senderId);
         }
       }
@@ -234,64 +238,118 @@ export default class Runtime extends Manager {
       genScriptMenu(activeInfo.tabId, scriptMenu);
     });
 
-    ScriptManager.hook.addListener("enable", (script: Script) => {
-      // 只处理后台脚本
-      if (script.type !== SCRIPT_TYPE_NORMAL) {
-        runBackScript.set(script.id, script);
-      }
-    });
-    ScriptManager.hook.addListener("disable", (script: Script) => {
-      if (script.type !== SCRIPT_TYPE_NORMAL) {
-        runBackScript.delete(script.id);
-      }
-    });
-
     Runtime.hook.addListener("runStatus", async (scriptId: number) => {
       const script = await this.scriptDAO.findById(scriptId);
       if (!script) {
         return;
       }
-      if (script.status !== SCRIPT_STATUS_ENABLE) {
+      if (
+        script.status !== SCRIPT_STATUS_ENABLE &&
+        script.runStatus !== "running"
+      ) {
         // 没开启并且不是运行中的脚本,删除
-        runBackScript.delete(scriptId);
+        this.runBackScript.delete(scriptId);
       } else {
         // 否则进行一次更新
-        runBackScript.set(scriptId, script);
+        this.runBackScript.set(scriptId, script);
       }
     });
 
+    // 记录运行次数与iframe运行
+    const runScript = new Map<
+      number,
+      Map<number, { script: Script; runNum: number; runNumByIframe: number }>
+    >();
+    const addRunScript = (
+      tabId: number,
+      script: Script,
+      iframe: boolean,
+      num: number = 1
+    ) => {
+      let scripts = runScript.get(tabId);
+      if (!scripts) {
+        scripts = new Map();
+        runScript.set(tabId, scripts);
+      }
+      let scriptNum = scripts.get(script.id);
+      if (!scriptNum) {
+        scriptNum = { script, runNum: 0, runNumByIframe: 0 };
+        scripts.set(script.id, scriptNum);
+      }
+      if (script.status === SCRIPT_STATUS_ENABLE) {
+        scriptNum.runNum += num;
+        if (iframe) {
+          scriptNum.runNumByIframe += num;
+        }
+      }
+    };
+    chrome.tabs.onRemoved.addListener((tabId) => {
+      runScript.delete(tabId);
+    });
     // 给popup页面获取运行脚本,与菜单
     this.message.setHandler(
       "queryPageScript",
-      (action: string, { url, tabId }: any) => {
+      async (action: string, { url, tabId }: any) => {
         const tabMap = scriptMenu.get(tabId);
-        const matchScripts = this.matchUrl(url);
-        const scriptList: ScriptMenu[] = [];
-        matchScripts.forEach((item) => {
-          const menus: ScriptMenuItem[] = [];
-          if (tabMap) {
-            tabMap.get(item.id)?.forEach((scriptItem) => {
-              menus.push({
-                name: scriptItem.request.params[1],
-                accessKey: scriptItem.request.params[2],
-                id: scriptItem.request.params[0],
-                sender: scriptItem.request.sender,
-                channelFlag: scriptItem.channel.flag,
-              });
-            });
-          }
-          scriptList.push({
-            id: item.id,
-            name: item.name,
-            enable: item.status === SCRIPT_STATUS_ENABLE,
-            updatetime: item.updatetime || item.createtime,
-            hasUserConfig: !!item.config,
-            menus,
+        const run = runScript.get(tabId);
+        let matchScripts = [];
+        if (!run) {
+          matchScripts = this.matchUrl(url).map((item) => {
+            return { runNum: 0, runNumByIframe: 0, script: item };
           });
-        });
+        } else {
+          matchScripts = Array.from(run.values());
+        }
+        const allPromise: Promise<ScriptMenu>[] = matchScripts.map(
+          async (item) => {
+            const menus: ScriptMenuItem[] = [];
+            if (tabMap) {
+              tabMap.get(item.script.id)?.forEach((scriptItem) => {
+                menus.push({
+                  name: scriptItem.request.params[1],
+                  accessKey: scriptItem.request.params[2],
+                  id: scriptItem.request.params[0],
+                  sender: scriptItem.request.sender,
+                  channelFlag: scriptItem.channel.flag,
+                });
+              });
+            }
+            const script = await this.scriptDAO.findById(item.script.id);
+            if (!script) {
+              return {
+                id: item.script.id,
+                name: i18nName(item.script),
+                enable: item.script.status === SCRIPT_STATUS_ENABLE,
+                updatetime: item.script.updatetime || item.script.createtime,
+                metadata: item.script.metadata,
+                hasUserConfig: !!item.script.config,
+                runNum: item.runNum,
+                runNumByIframe: item.runNumByIframe,
+                customExclude:
+                  item.script.selfMetadata && item.script.selfMetadata.exclude,
+                menus,
+              };
+            }
+            return {
+              id: script.id,
+              name: i18nName(script),
+              enable: script.status === SCRIPT_STATUS_ENABLE,
+              updatetime: script.updatetime || script.createtime,
+              metadata: item.script.metadata,
+              hasUserConfig: !!script?.config,
+              runNum: item.runNum,
+              runNumByIframe: item.runNumByIframe,
+              customExclude: script.selfMetadata && script.selfMetadata.exclude,
+              menus,
+            };
+          }
+        );
+
+        const scriptList: ScriptMenu[] = await Promise.all(allPromise);
+
         const backScriptList: ScriptMenu[] = [];
         const sandboxMenuMap = scriptMenu.get("sandbox");
-        runBackScript.forEach((item) => {
+        this.runBackScript.forEach((item) => {
           const menus: ScriptMenuItem[] = [];
           if (sandboxMenuMap) {
             sandboxMenuMap?.get(item.id)?.forEach((scriptItem) => {
@@ -304,14 +362,21 @@ export default class Runtime extends Manager {
               });
             });
           }
+
           backScriptList.push({
             id: item.id,
             name: item.name,
             enable: item.status === SCRIPT_STATUS_ENABLE,
             updatetime: item.updatetime || item.createtime,
+            metadata: item.metadata,
             runStatus: item.runStatus,
             hasUserConfig: !!item.config,
+            runNum:
+              item.runStatus && item.runStatus === SCRIPT_RUN_STATUS_RUNNING
+                ? 1
+                : 0,
             menus,
+            runNumByIframe: 0,
           });
         });
         return Promise.resolve({
@@ -332,38 +397,41 @@ export default class Runtime extends Manager {
           if (!(sender.url && sender.tabId)) {
             return;
           }
-
+          if (sender.frameId === undefined) {
+            // 清理之前的数据
+            runScript.delete(sender.tabId);
+          }
+          // 未开启
+          if (localStorage.enable_script === "false") {
+            return;
+          }
+          const exclude = this.customizeExclude.match(sender.url);
+          // 自定义排除的, buildScriptRunResource时会将selfMetadata合并,所以后续不需要再处理metadata.exclude,这算是一个隐性的坑,后面看看要不要处理
+          exclude.forEach((val) => {
+            addRunScript(sender.tabId!, val, false, 0);
+          });
           const filter: ScriptRunResouce[] = this.matchUrl(
             sender.url,
             (script) => {
-              // 开启并且不是iframe
-              return (
-                script.status !== SCRIPT_STATUS_ENABLE ||
-                (sender.frameId !== undefined && !!script.metadata.noframes)
-              );
+              // 如果是iframe,判断是否允许在iframe里运行
+              if (sender.frameId !== undefined) {
+                if (script.metadata.noframes) {
+                  return true;
+                }
+                addRunScript(sender.tabId!, script, true);
+                return script.status !== SCRIPT_STATUS_ENABLE;
+              }
+              addRunScript(sender.tabId!, script, false);
+              return script.status !== SCRIPT_STATUS_ENABLE;
             }
           );
 
-          // 注入运行框架
-          chrome.tabs.executeScript(sender.tabId, {
-            frameId: sender.frameId,
-            code: `(function(){
-                    let temp = document.createElement('script');
-                    temp.setAttribute('type', 'text/javascript');
-                    temp.innerHTML = "${injectedSource}";
-                    temp.className = "injected-js";
-                    document.documentElement.appendChild(temp)
-                    temp.remove();
-                }())`,
-            runAt: "document_start",
-          });
-
           if (!filter.length) {
-            resolve({ flag: scriptFlag, scripts: [] });
+            resolve({ scripts: [] });
             return;
           }
 
-          resolve({ flag: scriptFlag, scripts: filter });
+          resolve({ scripts: filter });
 
           // 注入脚本
           filter.forEach((script) => {
@@ -373,7 +441,6 @@ export default class Runtime extends Manager {
             }
             switch (runAt) {
               case "document-body":
-              case "document-menu":
               case "document-start":
                 runAt = "document_start";
                 break;
@@ -381,8 +448,6 @@ export default class Runtime extends Manager {
                 runAt = "document_end";
                 break;
               case "document-idle":
-                runAt = "document_idle";
-                break;
               default:
                 runAt = "document_idle";
                 break;
@@ -390,11 +455,11 @@ export default class Runtime extends Manager {
             chrome.tabs.executeScript(sender.tabId!, {
               frameId: sender.frameId,
               code: `(function(){
-                    let temp = document.createElement('script');
+                let temp = document.createElementNS("http://www.w3.org/1999/xhtml", "script");
                     temp.setAttribute('type', 'text/javascript');
                     temp.innerHTML = "${script.code}";
                     temp.className = "injected-js";
-                    document.documentElement.appendChild(temp)
+                    document.documentElement.appendChild(temp);
                     temp.remove();
                 }())`,
               runAt,
@@ -414,7 +479,7 @@ export default class Runtime extends Manager {
             }
           );
           chrome.browserAction.setBadgeBackgroundColor({
-            color: "#4594d5",
+            color: "#4e5969",
             tabId: sender.tabId,
           });
         });
@@ -422,14 +487,42 @@ export default class Runtime extends Manager {
     );
   }
 
+  setMessageSandbox(messageSandbox: MessageSandbox) {
+    this.messageSandbox = messageSandbox;
+  }
+
+  // 启动沙盒相关脚本
+  startSandbox(messageSandbox: MessageSandbox) {
+    this.messageSandbox = messageSandbox;
+    this.scriptDAO.table.toArray((items) => {
+      items.forEach((item) => {
+        // 容错处理
+        if (!item) {
+          this.logger.error("script is null");
+          return;
+        }
+        if (item.type === SCRIPT_TYPE_NORMAL) {
+          return;
+        }
+        // 加载所有的脚本
+        if (item.status === SCRIPT_STATUS_ENABLE) {
+          this.enable(item);
+          this.runBackScript.set(item.id, item);
+        }
+      });
+    });
+  }
+
   listenScriptRunStatus() {
     // 监听沙盒发送的脚本运行状态消息
     this.message.setHandler(
       "scriptRunStatus",
-      (action, [scriptId, runStatus]: any) => {
+      (action, [scriptId, runStatus, error, nextruntime]: any) => {
         this.scriptDAO.update(scriptId, {
           runStatus,
           lastruntime: new Date().getTime(),
+          nextruntime,
+          error,
         });
         Runtime.hook.trigger("runStatus", scriptId, runStatus);
       }
@@ -447,7 +540,9 @@ export default class Runtime extends Manager {
   }
 
   // 脚本发生变动
-  scriptUpdate(script: Script): Promise<boolean> {
+  async scriptUpdate(script: Script): Promise<boolean> {
+    // 脚本更新先更新资源
+    await this.resourceManager.checkScriptResource(script);
     if (script.status === SCRIPT_STATUS_ENABLE) {
       return this.enable(script as ScriptRunResouce);
     }
@@ -473,10 +568,11 @@ export default class Runtime extends Manager {
   // 脚本删除
   async scriptDelete(script: Script): Promise<boolean> {
     // 清理匹配资源
-    this.match.del(<ScriptRunResouce>script);
-    this.include.del(<ScriptRunResouce>script);
-    if (script.status === SCRIPT_STATUS_ENABLE) {
-      await this.disable(script);
+    if (script.type === SCRIPT_TYPE_NORMAL) {
+      this.match.del(<ScriptRunResouce>script);
+      this.include.del(<ScriptRunResouce>script);
+    } else {
+      this.unloadBackgroundScript(script);
     }
     return Promise.resolve(true);
   }
@@ -502,6 +598,10 @@ export default class Runtime extends Manager {
   // 加载页面脚本
   loadPageScript(script: ScriptRunResouce) {
     // 重构code
+    const logger = this.logger.with({
+      scriptId: script.id,
+      name: script.name,
+    });
     script.code = dealScript(compileInjectScript(script));
 
     this.match.del(<ScriptRunResouce>script);
@@ -511,7 +611,7 @@ export default class Runtime extends Manager {
         try {
           this.match.add(url, script);
         } catch (e) {
-          this.logger.error("url加载错误", Logger.E(e));
+          logger.error("url load error", Logger.E(e));
         }
       });
     }
@@ -520,7 +620,7 @@ export default class Runtime extends Manager {
         try {
           this.include.add(url, script);
         } catch (e) {
-          this.logger.error("url加载错误", Logger.E(e));
+          logger.error("url load error", Logger.E(e));
         }
       });
     }
@@ -530,7 +630,16 @@ export default class Runtime extends Manager {
           this.include.exclude(url, script);
           this.match.exclude(url, script);
         } catch (e) {
-          this.logger.error("url加载错误", Logger.E(e));
+          logger.error("url load error", Logger.E(e));
+        }
+      });
+    }
+    if (script.selfMetadata && script.selfMetadata.exclude) {
+      script.selfMetadata.exclude.forEach((url) => {
+        try {
+          this.customizeExclude.add(url, script);
+        } catch (e) {
+          logger.error("url load error", Logger.E(e));
         }
       });
     }
@@ -542,11 +651,14 @@ export default class Runtime extends Manager {
     return this.loadPageScript(<ScriptRunResouce>script);
   }
 
-  // 加载后台脚本
+  // 加载并启动后台脚本
   loadBackgroundScript(script: ScriptRunResouce): Promise<boolean> {
+    this.runBackScript.set(script.id, script);
     return new Promise((resolve, reject) => {
+      // 清除重试数据
+      script.nextruntime = 0;
       this.messageSandbox
-        .syncSend("enable", script)
+        ?.syncSend("enable", script)
         .then(() => {
           resolve(true);
         })
@@ -557,11 +669,12 @@ export default class Runtime extends Manager {
     });
   }
 
-  // 卸载后台脚本
+  // 卸载并停止后台脚本
   unloadBackgroundScript(script: Script): Promise<boolean> {
+    this.runBackScript.delete(script.id);
     return new Promise((resolve, reject) => {
       this.messageSandbox
-        .syncSend("disable", script.id)
+        ?.syncSend("disable", script.id)
         .then(() => {
           resolve(true);
         })
@@ -574,14 +687,14 @@ export default class Runtime extends Manager {
 
   async startBackgroundScript(script: Script) {
     const scriptRes = await this.buildScriptRunResource(script);
-    this.messageSandbox.syncSend("start", scriptRes);
+    this.messageSandbox?.syncSend("start", scriptRes);
     return Promise.resolve(true);
   }
 
   stopBackgroundScript(scriptId: number) {
     return new Promise((resolve, reject) => {
       this.messageSandbox
-        .syncSend("stop", scriptId)
+        ?.syncSend("stop", scriptId)
         .then((resp) => {
           resolve(resp);
         })

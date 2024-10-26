@@ -1,11 +1,16 @@
-// eslint-disable-next-line max-classes-per-file
+/* eslint-disable max-classes-per-file */
+
+import Logger from "@App/app/logger/logger";
+
 export default class Match<T> {
   protected cache = new Map<string, T[]>();
 
   protected rule = new Map<string, T[]>();
 
-  // eslint-disable-next-line class-methods-use-this
   protected parseURL(url: string): Url | undefined {
+    if (url.indexOf("*http") === 0) {
+      url = url.substring(1);
+    }
     const match = /^(.+?):\/\/(.*?)((\/.*?)(\?.*?|)|)$/.exec(url);
     if (match) {
       return {
@@ -39,16 +44,18 @@ export default class Match<T> {
         u.scheme = ".+?";
         break;
       case "http*":
-        u.scheme = "http[s]";
+        u.scheme = "http[s]?";
         break;
       default:
     }
     let pos = u.host.indexOf("*");
-    if (u.host === "*") {
+    if (u.host === "*" || u.host === "**") {
       pos = -1;
     } else if (u.host.endsWith("*")) {
       // 处理*结尾
-      u.host = u.host.substring(0, u.host.length - 1);
+      if (!u.host.endsWith(":*")) {
+        u.host = u.host.substring(0, u.host.length - 1);
+      }
     } else if (pos !== -1 && pos !== 0) {
       return "";
     }
@@ -70,7 +77,12 @@ export default class Match<T> {
     if (pos2 === -1) {
       u.host = `${u.host}(:\\d+)?`;
     } else {
-      u.host = `${u.host.substring(0, pos2)}(:\\d+)?`;
+      const port = u.host.substring(pos2 + 1);
+      if (port === "*") {
+        u.host = `${u.host.substring(0, pos2)}(:\\d+)?`;
+      } else {
+        u.host = `${u.host.substring(0, pos2)}(:${port})?`;
+      }
     }
     let re = `^${u.scheme}://${u.host}`;
     if (u.path === "/") {
@@ -104,12 +116,21 @@ export default class Match<T> {
       return ret;
     }
     ret = [];
-    this.rule.forEach((val, key) => {
-      const re = new RegExp(key);
-      if (re.test(url) && ret) {
-        ret.push(...val);
-      }
-    });
+    try {
+      this.rule.forEach((val, key) => {
+        const re = new RegExp(key);
+        if (re.test(url) && ret) {
+          ret.push(...val);
+        }
+      });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("bad match rule", Logger.E(e));
+      // LoggerCore.getLogger({ component: "match" }).warn(
+      //   "bad match rule",
+      //   Logger.E(e)
+      // );
+    }
     this.cache.set(url, ret);
     return ret;
   }
@@ -222,7 +243,7 @@ export class UrlInclude<T> extends UrlMatch<T> {
         u.scheme = ".+?";
         break;
       case "http*":
-        u.scheme = "http[s]";
+        u.scheme = "http[s]?";
         break;
       default:
     }

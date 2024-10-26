@@ -1,13 +1,20 @@
 /* eslint-disable camelcase */
 /* eslint-disable max-classes-per-file */
+import { ExtVersion } from "@App/app/const";
 import LoggerCore from "@App/app/logger/core";
 import { Channel, ChannelHandler } from "@App/app/message/channel";
+import MessageContent from "@App/app/message/content";
 import { MessageManager } from "@App/app/message/message";
 import { ScriptRunResouce } from "@App/app/repo/scripts";
-import { blobToBase64, getMetadataStr } from "@App/pkg/utils/script";
+import {
+  base64ToBlob,
+  blobToBase64,
+  getMetadataStr,
+  getUserConfigStr,
+  parseUserConfig,
+} from "@App/pkg/utils/script";
 import { v4 as uuidv4 } from "uuid";
 import { ValueUpdateData } from "./exec_script";
-import { addStyle } from "./utils";
 
 interface ApiParam {
   depend?: string[];
@@ -32,16 +39,23 @@ export class GMContext {
       if (param.listener) {
         param.listener();
       }
+      if (key === "GMdotXmlHttpRequest") {
+        GMContext.apis.set("GM.xmlHttpRequest", {
+          api: descriptor.value,
+          param,
+        });
+        return;
+      }
       GMContext.apis.set(key, {
         api: descriptor.value,
         param,
       });
       // 兼容GM.*
-      let dot = key.replace("_", ".");
+      const dot = key.replace("_", ".");
       if (dot !== key) {
         // 特殊处理GM.xmlHttpRequest
         if (dot === "GM.xmlhttpRequest") {
-          dot = "GM.xmlHttpRequest";
+          return;
         }
         GMContext.apis.set(dot, {
           api: descriptor.value,
@@ -119,21 +133,40 @@ export default class GMApi {
   // 获取脚本信息和管理器信息
   static GM_info(script: ScriptRunResouce) {
     const metadataStr = getMetadataStr(script.sourceCode);
+    const userConfigStr = getUserConfigStr(script.sourceCode) || "";
+    const options = {
+      description:
+        (script.metadata.description && script.metadata.description[0]) || null,
+      matches: script.metadata.match || [],
+      includes: script.metadata.include || [],
+      "run-at":
+        (script.metadata["run-at"] && script.metadata["run-at"][0]) ||
+        "document-idle",
+      icon: (script.metadata.icon && script.metadata.icon[0]) || null,
+      icon64: (script.metadata.icon64 && script.metadata.icon64[0]) || null,
+      header: metadataStr,
+      grant: script.metadata.grant || [],
+      connects: script.metadata.connect || [],
+    };
+
     return {
       // downloadMode
       // isIncognito
-      scriptWillUpdate: false,
+      scriptWillUpdate: true,
       scriptHandler: "ScriptCat",
-      scriptUpdateURL: script.checkUpdateUrl,
+      scriptUpdateURL: script.downloadUrl,
       scriptMetaStr: metadataStr,
-      scriptSource: script.sourceCode,
-      version: script.metadata.version && script.metadata.version[0],
+      userConfig: parseUserConfig(userConfigStr),
+      userConfigStr,
+      // scriptSource: script.sourceCode,
+      version: ExtVersion,
       script: {
         // TODO: 更多完整的信息(为了兼容Tampermonkey,后续待定)
         name: script.name,
         namespace: script.namespace,
         version: script.metadata.version && script.metadata.version[0],
         author: script.author,
+        ...options,
       },
     };
   }
@@ -168,6 +201,7 @@ export default class GMApi {
         key,
         value,
         createtime: new Date().getTime(),
+        updatetime: 0,
       };
     }
     if (value === undefined) {
@@ -209,6 +243,27 @@ export default class GMApi {
     return this.message.syncSend("CAT_fetchBlob", url);
   }
 
+  @GMContext.API()
+  public CAT_fetchDocument(url: string): Promise<Document | undefined> {
+    return new Promise((resolve) => {
+      let el: Document | undefined;
+      (<MessageContent>this.message).sendCallback(
+        "CAT_fetchDocument",
+        url,
+        (resp) => {
+          el = <Document>(
+            (<unknown>(
+              (<MessageContent>this.message).getAndDelRelatedTarget(
+                resp.relatedTarget
+              )
+            ))
+          );
+          resolve(el);
+        }
+      );
+    });
+  }
+
   // 辅助GM_xml发送blob数据
   @GMContext.API()
   public CAT_createBlobUrl(blob: Blob): Promise<string> {
@@ -216,7 +271,41 @@ export default class GMApi {
   }
 
   // 用于脚本跨域请求,需要@connect domain指定允许的域名
-  @GMContext.API({ depend: ["CAT_fetchBlob", "CAT_createBlobUrl"] })
+  @GMContext.API({
+    depend: [
+      "CAT_fetchBlob",
+      "CAT_createBlobUrl",
+      "CAT_fetchDocument",
+      "GM_xmlhttpRequest",
+    ],
+  })
+  GMdotXmlHttpRequest(details: GMTypes.XHRDetails) {
+    let abort: any;
+    const ret = new Promise((resolve, reject) => {
+      const oldOnload = details.onload;
+      details.onload = (data) => {
+        resolve(data);
+        oldOnload && oldOnload(data);
+      };
+      const oldOnerror = details.onerror;
+      details.onerror = (data) => {
+        reject(data);
+        oldOnerror && oldOnerror(data);
+      };
+      // @ts-ignore
+      abort = this.GM_xmlhttpRequest(details);
+    });
+    if (abort && abort.abort) {
+      // @ts-ignore
+      ret.abort = abort.abort;
+    }
+    return ret;
+  }
+
+  // 用于脚本跨域请求,需要@connect domain指定允许的域名
+  @GMContext.API({
+    depend: ["CAT_fetchBlob", "CAT_createBlobUrl", "CAT_fetchDocument"],
+  })
   public GM_xmlhttpRequest(details: GMTypes.XHRDetails) {
     let connect: Channel;
 
@@ -296,24 +385,46 @@ export default class GMApi {
         }
       }
 
+      let readerStream: ReadableStream<Uint8Array> | undefined;
+      // eslint-disable-next-line no-undef
+      let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
       // 如果返回类型是arraybuffer或者blob的情况下,需要将返回的数据转化为blob
       // 在background通过URL.createObjectURL转化为url,然后在content页读取url获取blob对象
+      const responseType = details.responseType?.toLocaleLowerCase();
       const warpResponse = (old: Function) => {
+        if (responseType === "stream") {
+          readerStream = new ReadableStream<Uint8Array>({
+            start(ctrl) {
+              controller = ctrl;
+            },
+          });
+        }
         return async (xhr: GMTypes.XHRResponse) => {
           if (xhr.response) {
-            const resp = await this.CAT_fetchBlob(<string>xhr.response);
-            if (details.responseType === "arraybuffer") {
-              xhr.response = await resp.arrayBuffer();
+            if (responseType === "document") {
+              xhr.response = await this.CAT_fetchDocument(<string>xhr.response);
+              xhr.responseXML = xhr.response;
+              xhr.responseType = "document";
             } else {
-              xhr.response = resp;
+              const resp = await this.CAT_fetchBlob(<string>xhr.response);
+              if (responseType === "arraybuffer") {
+                xhr.response = await resp.arrayBuffer();
+              } else {
+                xhr.response = resp;
+              }
             }
+          }
+          if (responseType === "stream") {
+            xhr.response = readerStream;
           }
           old(xhr);
         };
       };
       if (
-        details.responseType?.toLowerCase() === "arraybuffer" ||
-        details.responseType?.toLocaleLowerCase() === "blob"
+        responseType === "arraybuffer" ||
+        responseType === "blob" ||
+        responseType === "document" ||
+        responseType === "stream"
       ) {
         if (details.onload) {
           details.onload = warpResponse(details.onload);
@@ -323,6 +434,15 @@ export default class GMApi {
         }
         if (details.onloadend) {
           details.onloadend = warpResponse(details.onloadend);
+        }
+        // document类型读取blob,然后在content页转化为document对象
+        if (responseType === "document") {
+          param.responseType = "blob";
+        }
+        if (responseType === "stream") {
+          if (details.onloadstart) {
+            details.onloadstart = warpResponse(details.onloadstart);
+          }
         }
       }
 
@@ -334,6 +454,9 @@ export default class GMApi {
             break;
           case "onloadend":
             details.onloadend && details.onloadend(data);
+            if (readerStream) {
+              controller?.close();
+            }
             break;
           case "onloadstart":
             details.onloadstart && details.onloadstart(data);
@@ -352,6 +475,9 @@ export default class GMApi {
             break;
           case "onabort":
             details.onabort && details.onabort();
+            break;
+          case "onstream":
+            controller?.enqueue(new Uint8Array(resp.data));
             break;
           default:
             LoggerCore.getLogger().warn("GM_xmlhttpRequest resp is error", {
@@ -459,6 +585,9 @@ export default class GMApi {
     level?: GMTypes.LoggerLevel,
     labels?: GMTypes.LoggerLabel
   ) {
+    if (typeof message !== "string") {
+      message = JSON.stringify(message);
+    }
     return this.sendMessage("GM_log", [message, level, labels]);
   }
 
@@ -471,9 +600,12 @@ export default class GMApi {
     if (arguments.length === 1) {
       option.active = true;
     } else if (typeof options === "boolean") {
-      option.active = options;
+      option.active = !options;
     } else {
       option = <GMTypes.OpenTabOptions>options;
+    }
+    if (option.active === undefined) {
+      option.active = true;
     }
     let tabid: any;
 
@@ -518,20 +650,42 @@ export default class GMApi {
   }
 
   @GMContext.API()
-  GM_getResourceURL(name: string): string | undefined {
+  GM_getResourceURL(name: string, isBlobUrl?: boolean): string | undefined {
     if (!this.scriptRes.resource) {
       return undefined;
     }
     const r = this.scriptRes.resource[name];
     if (r) {
+      if (isBlobUrl) {
+        return URL.createObjectURL(base64ToBlob(r.base64));
+      }
       return r.base64;
     }
     return undefined;
   }
 
   @GMContext.API()
-  GM_addStyle(css: string): HTMLElement {
-    return addStyle(css);
+  GM_addStyle(css: string) {
+    let el: Element | undefined;
+    // 与content页的消息通讯实际是同步,此方法不需要经过background
+    // 所以可以直接在then中赋值el再返回
+    (<MessageContent>this.message).sendCallback(
+      "GM_addElement",
+      {
+        param: [
+          "style",
+          {
+            textContent: css,
+          },
+        ],
+      },
+      (resp) => {
+        el = (<MessageContent>this.message).getAndDelRelatedTarget(
+          resp.relatedTarget
+        );
+      }
+    );
+    return el;
   }
 
   @GMContext.API()
@@ -643,12 +797,26 @@ export default class GMApi {
 
   menuId: number | undefined;
 
+  menuMap: Map<number, string> | undefined;
+
   @GMContext.API()
   GM_registerMenuCommand(
     name: string,
     listener: () => void,
     accessKey?: string
   ): number {
+    if (!this.menuMap) {
+      this.menuMap = new Map();
+    }
+    let flag = 0;
+    this.menuMap.forEach((val, key) => {
+      if (val === name) {
+        flag = key;
+      }
+    });
+    if (flag) {
+      return flag;
+    }
     if (!this.menuId) {
       this.menuId = 1;
     } else {
@@ -658,11 +826,88 @@ export default class GMApi {
     this.connect("GM_registerMenuCommand", [id, name, accessKey], () => {
       listener();
     });
+    this.menuMap.set(id, name);
     return id;
   }
 
   @GMContext.API()
   GM_unregisterMenuCommand(id: number): void {
+    if (!this.menuMap) {
+      this.menuMap = new Map();
+    }
+    this.menuMap.delete(id);
     this.sendMessage("GM_unregisterMenuCommand", [id]);
+  }
+
+  @GMContext.API()
+  CAT_userConfig() {
+    return this.sendMessage("CAT_userConfig", []);
+  }
+
+  // 此API在content页实现
+  @GMContext.API()
+  GM_addElement(parentNode: Element | string, tagName: any, attrs?: any) {
+    let el: Element | undefined;
+    // 与content页的消息通讯实际是同步,此方法不需要经过background
+    // 所以可以直接在then中赋值el再返回
+    (<MessageContent>this.message).sendCallback(
+      "GM_addElement",
+      {
+        param: [
+          typeof parentNode === "string" ? parentNode : tagName,
+          typeof parentNode === "string" ? tagName : attrs,
+        ],
+        relatedTarget: typeof parentNode === "string" ? null : parentNode,
+      },
+      (resp) => {
+        el = (<MessageContent>this.message).getAndDelRelatedTarget(
+          resp.relatedTarget
+        );
+      }
+    );
+    return el;
+  }
+
+  @GMContext.API({
+    depend: ["CAT_fetchBlob", "CAT_createBlobUrl"],
+  })
+  async CAT_fileStorage(
+    action: "list" | "download" | "upload" | "delete" | "config",
+    details: any
+  ) {
+    if (action === "config") {
+      this.sendMessage("CAT_fileStorage", ["config"]);
+      return;
+    }
+    const sendDetails: { [key: string]: string } = {
+      baseDir: details.baseDir || "",
+      path: details.path || "",
+      filename: details.filename,
+      file: details.file,
+    };
+    if (action === "upload") {
+      const url = await this.CAT_createBlobUrl(details.data);
+      sendDetails.data = url;
+    }
+    const channel = this.connect(
+      "CAT_fileStorage",
+      [action, sendDetails],
+      async (resp: any) => {
+        if (action === "download") {
+          // 读取blob
+          const blob = await this.CAT_fetchBlob(resp.data);
+          details.onload && details.onload(blob);
+        } else {
+          details.onload && details.onload(resp.data);
+        }
+      }
+    );
+    channel.setCatch((err) => {
+      if (typeof err.code === "undefined") {
+        details.onerror && details.onerror({ code: -1, message: err.message });
+        return;
+      }
+      details.onerror && details.onerror(err);
+    });
   }
 }

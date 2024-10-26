@@ -58,6 +58,9 @@ export default class SubscribeManager extends Manager {
     // 启动订阅检查更新
     // 十分钟对符合要求的订阅进行检查更新
     setInterval(() => {
+      if (!this.systemConfig.checkScriptUpdateCycle) {
+        return;
+      }
       this.logger.debug("start check update");
       this.subscribeDAO.table
         .where("checktime")
@@ -128,9 +131,14 @@ export default class SubscribeManager extends Manager {
       subscribeId: subscribe.id,
       name: subscribe.name,
     });
-    this.subscribeDAO.update(id, { checktime: new Date().getTime() });
+    await this.subscribeDAO.update(id, { checktime: new Date().getTime() });
     try {
-      const info = await fetchScriptInfo(subscribe.url, source, false);
+      const info = await fetchScriptInfo(
+        subscribe.url,
+        source,
+        false,
+        subscribe.url
+      );
       const { metadata } = info;
       if (!metadata) {
         logger.error("parse metadata failed");
@@ -170,11 +178,11 @@ export default class SubscribeManager extends Manager {
         if (
           checkSilenceUpdate(
             newSubscribe.oldSubscribe!.metadata,
-            newSubscribe.metadata
+            newSubscribe.subscribe.metadata
           )
         ) {
           logger.info("silence update subscribe");
-          this.upsertHandler(newSubscribe);
+          this.upsertHandler(newSubscribe.subscribe);
           return;
         }
       } catch (e) {
@@ -183,7 +191,7 @@ export default class SubscribeManager extends Manager {
     }
     Cache.getInstance().set(CacheKey.scriptInfo(info.uuid), info);
     chrome.tabs.create({
-      url: `src/install.html?uuid=${info.uuid}`,
+      url: `/src/install.html?uuid=${info.uuid}`,
     });
   }
 
@@ -247,12 +255,16 @@ export default class SubscribeManager extends Manager {
     });
 
     await Promise.allSettled(result);
+
+    await this.subscribeDAO.update(subscribe.id, subscribe);
+
     InfoNotification(
       "订阅更新",
       `安装了:${notification[0].join(",")}\n删除了:${notification[1].join(
         "\n"
       )}`
     );
+
     logger.info("subscribe update", {
       install: notification[0],
       update: notification[1],

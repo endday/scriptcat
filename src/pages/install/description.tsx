@@ -26,43 +26,9 @@ import { nextTime } from "@App/pkg/utils/utils";
 import IoC from "@App/app/ioc";
 import { Subscribe, SUBSCRIBE_STATUS_ENABLE } from "@App/app/repo/subscribe";
 import SubscribeController from "@App/app/service/subscribe/controller";
+import { useTranslation } from "react-i18next";
+import { i18nDescription, i18nName } from "@App/locales/locales";
 import CodeEditor from "../components/CodeEditor";
-
-// 不推荐的内容标签与描述
-const antifeatures: {
-  [key: string]: { color: string; title: string; description: string };
-} = {
-  "referral-link": {
-    color: "purple",
-    title: "推荐链接",
-    description: "该脚本会修改或重定向到作者的返佣链接",
-  },
-  ads: {
-    color: "orange",
-    title: "附带广告",
-    description: "该脚本会在你访问的页面上插入广告",
-  },
-  payment: {
-    color: "magenta",
-    title: "付费脚本",
-    description: "该脚本需要你付费才能够正常使用",
-  },
-  miner: {
-    color: "orangered",
-    title: "挖矿",
-    description: "该脚本存在挖坑行为",
-  },
-  membership: {
-    color: "blue",
-    title: "会员功能",
-    description: "该脚本需要注册会员才能正常使用",
-  },
-  tracking: {
-    color: "pinkpurple",
-    title: "信息追踪",
-    description: "该脚本会追踪你的用户信息",
-  },
-};
 
 type Permission = { label: string; color?: string; value: string[] }[];
 
@@ -92,17 +58,66 @@ export default function Description() {
     SubscribeController
   ) as SubscribeController;
   const [isSub, setIsSub] = useState<boolean>(false);
+  // 按钮文案
+  const [btnText, setBtnText] = useState<string>();
+  const { t } = useTranslation();
+
+  // 不推荐的内容标签与描述
+  const antifeatures: {
+    [key: string]: { color: string; title: string; description: string };
+  } = {
+    "referral-link": {
+      color: "purple",
+      title: t("antifeature_referral_link_title"),
+      description: t("antifeature_referral_link_description"),
+    },
+    ads: {
+      color: "orange",
+      title: t("antifeature_ads_title"),
+      description: t("antifeature_ads_description"),
+    },
+    payment: {
+      color: "magenta",
+      title: t("antifeature_payment_title"),
+      description: t("antifeature_payment_description"),
+    },
+    miner: {
+      color: "orangered",
+      title: t("antifeature_miner_title"),
+      description: t("antifeature_miner_description"),
+    },
+    membership: {
+      color: "blue",
+      title: t("antifeature_membership_title"),
+      description: t("antifeature_membership_description"),
+    },
+    tracking: {
+      color: "pinkpurple",
+      title: t("antifeature_tracking_title"),
+      description: t("antifeature_tracking_description"),
+    },
+  };
+
+  useEffect(() => {
+    if (isSub) {
+      setBtnText(isUpdate ? t("update_subscribe")! : t("install_subscribe")!);
+    } else {
+      setBtnText(isUpdate ? t("update_script")! : t("install_script")!);
+    }
+  }, [isSub, isUpdate]);
   useEffect(() => {
     if (countdown === -1) {
       return;
     }
     setTimeout(() => {
-      setCountdown((t) => {
-        if (t > 0) {
-          return t - 1;
+      setCountdown((time) => {
+        if (time > 0) {
+          return time - 1;
         }
-        closeWindow();
-        return 0;
+        if (time === 0) {
+          closeWindow();
+        }
+        return time;
       });
     }, 1000);
   }, [countdown]);
@@ -110,57 +125,64 @@ export default function Description() {
   const url = new URL(window.location.href);
   const uuid = url.searchParams.get("uuid");
   if (!uuid) {
-    return <p>错误的链接</p>;
+    return <p>{t("invalid_link")}</p>;
   }
   useEffect(() => {
     scriptCtrl.fetchScriptInfo(uuid).then(async (resp: ScriptInfo) => {
       if (!resp) {
         return;
       }
-      let script:
-        | (Script & { oldScript?: Script })
-        | (Subscribe & { oldSubscribe?: Subscribe });
+      let prepare:
+        | { script: Script; oldScript?: Script }
+        | { subscribe: Subscribe; oldSubscribe?: Subscribe };
+      let action: Script | Subscribe;
       if (resp.isSubscribe) {
         setIsSub(true);
-        script = await prepareSubscribeByCode(resp.code, resp.url);
-        setOldScript(script.oldSubscribe);
-        delete script.oldSubscribe;
+        prepare = await prepareSubscribeByCode(resp.code, resp.url);
+        action = prepare.subscribe;
+        setOldScript(prepare.oldSubscribe);
+        delete prepare.oldSubscribe;
       } else {
-        script = await prepareScriptByCode(resp.code, resp.url, resp.uuid);
-        setOldScript(script.oldScript);
-        delete script.oldScript;
+        if (resp.isUpdate) {
+          prepare = await prepareScriptByCode(resp.code, resp.url, resp.uuid);
+        } else {
+          prepare = await prepareScriptByCode(resp.code, resp.url);
+        }
+        action = prepare.script;
+        setOldScript(prepare.oldScript);
+        delete prepare.oldScript;
       }
-      setEnable(script.status === SUBSCRIBE_STATUS_ENABLE);
+      setEnable(action.status === SUBSCRIBE_STATUS_ENABLE);
       if (resp.source === "system") {
-        setCountdown(30);
+        setCountdown(60);
       }
-      const meta = script.metadata;
+      const meta = action.metadata;
       if (!meta) {
         return;
       }
       const perm: Permission = [];
       if (resp.isSubscribe) {
         perm.push({
-          label: "该订阅将会安装下面的脚本",
+          label: t("subscribe_install_label"),
           color: "#ff0000",
           value: meta.scripturl,
         });
       }
       if (meta.match) {
-        perm.push({ label: "脚本将在下面的网站中运行", value: meta.match });
+        perm.push({ label: t("script_runs_in"), value: meta.match });
       }
       if (meta.connect) {
         perm.push({
-          label: "脚本将获得以下地址的完整访问权限",
+          label: t("script_has_full_access_to"),
           color: "#F9925A",
           value: meta.connect,
         });
       }
       if (meta.require) {
-        perm.push({ label: "脚本引用了下列外部资源", value: meta.require });
+        perm.push({ label: t("script_requires"), value: meta.require });
       }
-      setUpsertScript(script);
-      if (script.id !== 0) {
+      setUpsertScript(action);
+      if (action.id !== 0) {
         setIsUpdate(true);
       }
       setPermission(perm);
@@ -176,26 +198,28 @@ export default function Description() {
       if (isCookie) {
         desList.push(
           <Typography.Text type="error" key="cookie">
-            请注意,本脚本会申请cookie的操作权限,这是一个危险的权限,请确认脚本的安全性.
+            {t("cookie_warning")}
           </Typography.Text>
         );
       }
       if (meta.crontab) {
         desList.push(
           <Typography.Text key="crontab">
-            这是一个定时脚本,开启将会在特点时间自动运行,也可以在面板中手动控制运行.
+            {t("scheduled_script_description_1")}
           </Typography.Text>
         );
         desList.push(
           <Typography.Text key="cronta-nexttime">
-            crontab表达式: {meta.crontab[0]} 最近一次运行时间:{" "}
-            {nextTime(meta.crontab[0])}
+            {t("scheduled_script_description_2", {
+              expression: meta.crontab[0],
+              time: nextTime(meta.crontab[0]),
+            })}
           </Typography.Text>
         );
       } else if (meta.background) {
         desList.push(
           <Typography.Text key="background">
-            这是一个后台脚本,开启将会在浏览器打开时自动运行一次,也可以在面板中手动控制运行.
+            {t("background_script_description")}
           </Typography.Text>
         );
       }
@@ -203,9 +227,9 @@ export default function Description() {
         setDescription(<div>{desList.map((item) => item)}</div>);
       }
       // 修改网页显示title
-      document.title = `${script.id === 0 ? "安装" : "更新"}脚本 - ${
-        meta.name
-      } - ScriptCat`;
+      document.title = `${
+        action.id === 0 ? t("install_script") : t("update_script")
+      } - ${meta.name} - ScriptCat`;
     });
   }, []);
   return (
@@ -223,12 +247,12 @@ export default function Description() {
                 </Avatar>
               )}
               <Typography.Text bold className="text-size-lg">
-                {metadata.name}
+                {upsertScript && i18nName(upsertScript)}
                 <Tooltip
                   content={
                     isSub
-                      ? "这是一个订阅源，当你开启订阅后会自动安装订阅的脚本"
-                      : "可以控制脚本开启状态，普通油猴脚本默认开启，后台脚本、定时脚本默认关闭"
+                      ? t("subscribe_source_tooltip")
+                      : t("script_status_tooltip")
                   }
                 >
                   <Switch
@@ -251,10 +275,14 @@ export default function Description() {
               </Typography.Text>
             </div>
             <div>
-              <Typography.Text bold>{metadata.description}</Typography.Text>
+              <Typography.Text bold>
+                {upsertScript && i18nDescription(upsertScript)}
+              </Typography.Text>
             </div>
             <div>
-              <Typography.Text bold>作者: {metadata.author}</Typography.Text>
+              <Typography.Text bold>
+                {t("author")}: {metadata.author}
+              </Typography.Text>
             </div>
             <div>
               <Typography.Text
@@ -267,7 +295,7 @@ export default function Description() {
                   overflowY: "auto",
                 }}
               >
-                来源: {info?.url}
+                {t("source")}: {info?.url}
               </Typography.Text>
             </div>
             <div className="text-end">
@@ -277,40 +305,60 @@ export default function Description() {
                   size="small"
                   onClick={() => {
                     if (!upsertScript) {
-                      Message.error("脚本信息加载失败!");
+                      Message.error(t("script_info_load_failed")!);
                       return;
                     }
                     if (isSub) {
                       subscribeCtrl
                         .upsert(upsertScript as Subscribe)
                         .then(() => {
-                          closeWindow();
+                          Message.success(t("subscribe_success")!);
+                          setBtnText(t("subscribe_success")!);
+                          setTimeout(() => {
+                            closeWindow();
+                          }, 200);
                         })
                         .catch((e) => {
-                          Message.error(`订阅失败: ${e}`);
+                          Message.error(`${t("subscribe_failed")}: ${e}`);
                         });
                       return;
                     }
                     scriptCtrl
                       .upsert(upsertScript as Script)
                       .then(() => {
-                        closeWindow();
+                        if (isUpdate) {
+                          Message.success(t("install.update_success")!);
+                          setBtnText(t("install.update_success")!);
+                        } else {
+                          Message.success(t("install_success")!);
+                          setBtnText(t("install_success")!);
+                        }
+                        setTimeout(() => {
+                          closeWindow();
+                        }, 200);
                       })
                       .catch((e) => {
-                        Message.error(`安装失败: ${e}`);
+                        Message.error(`${t("install_failed")}: ${e}`);
                       });
                   }}
                 >
-                  {isSub && (isUpdate ? "更新订阅" : "订阅")}
-                  {!isSub && (isUpdate ? "更新" : "安装")}
+                  {btnText}
                 </Button>
                 <Button
                   type="primary"
                   status="danger"
                   size="small"
-                  onClick={closeWindow}
+                  onClick={() => {
+                    if (countdown === -1) {
+                      closeWindow();
+                    } else {
+                      setCountdown(-1);
+                    }
+                  }}
                 >
-                  关闭{countdown !== -1 && <>({countdown})</>}
+                  {countdown === -1
+                    ? t("close")
+                    : `${t("stop")} (${countdown})`}
                 </Button>
               </Space>
             </div>
@@ -322,7 +370,9 @@ export default function Description() {
               <Space>
                 {oldScript && (
                   <Tooltip
-                    content={`当前版本为:v${oldScript.metadata.version[0]}`}
+                    content={`${t("current_version")}: v${
+                      oldScript.metadata.version[0]
+                    }`}
                   >
                     <Tag bordered>{oldScript.metadata.version[0]}</Tag>
                   </Tooltip>
@@ -330,7 +380,7 @@ export default function Description() {
                 {metadata.version && (
                   <Tooltip
                     color="red"
-                    content={`更新版本为:v${metadata.version[0]}`}
+                    content={`${t("update_version")}: v${metadata.version[0]}`}
                   >
                     <Tag bordered color="red">
                       {metadata.version[0]}
@@ -338,16 +388,16 @@ export default function Description() {
                   </Tooltip>
                 )}
                 {(metadata.background || metadata.crontab) && (
-                  <Tooltip color="green" content="这是一个后台脚本">
+                  <Tooltip color="green" content={t("background_script_tag")}>
                     <Tag bordered color="green">
-                      后台脚本
+                      {t("background_script")}
                     </Tag>
                   </Tooltip>
                 )}
                 {metadata.crontab && (
-                  <Tooltip color="green" content="这是一个定时脚本">
+                  <Tooltip color="green" content={t("scheduled_script_tag")}>
                     <Tag bordered color="green">
-                      定时脚本
+                      {t("scheduled_script")}
                     </Tag>
                   </Tooltip>
                 )}
@@ -372,7 +422,7 @@ export default function Description() {
             {description && description}
             <div>
               <Typography.Text type="error">
-                请从合法的来源安装脚本!!!未知的脚本可能会侵犯您的隐私或者做出恶意的操作!!!
+                {t("install_from_legitimate_sources_warning")}
               </Typography.Text>
             </div>
           </Space>
@@ -410,7 +460,7 @@ export default function Description() {
       </Grid.Row>
       <CodeEditor
         id="show-code"
-        code={upsertScript?.code || ""}
+        code={upsertScript?.code || undefined}
         diffCode={oldScript?.code || ""}
       />
     </div>

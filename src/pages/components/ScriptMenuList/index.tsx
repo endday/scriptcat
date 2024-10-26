@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary */
 import React, { useEffect, useState } from "react";
 import MessageInternal from "@App/app/message/internal";
 import { MessageSender } from "@App/app/message/message";
@@ -12,9 +13,12 @@ import {
   Switch,
 } from "@arco-design/web-react";
 import {
+  IconCaretDown,
+  IconCaretUp,
   IconDelete,
   IconEdit,
   IconMenu,
+  IconMinus,
   IconSettings,
 } from "@arco-design/web-react/icon";
 import IoC from "@App/app/ioc";
@@ -22,18 +26,46 @@ import ScriptController from "@App/app/service/script/controller";
 import { SCRIPT_RUN_STATUS_RUNNING } from "@App/app/repo/scripts";
 import { RiPlayFill, RiStopFill } from "react-icons/ri";
 import RuntimeController from "@App/runtime/content/runtime";
+import { useTranslation } from "react-i18next";
+import { SystemConfig } from "@App/pkg/config/config";
+import { ScriptIcons } from "@App/pages/options/routes/utils";
 
 const CollapseItem = Collapse.Item;
+
+function isExclude(script: ScriptMenu, host: string) {
+  if (!script.customExclude) {
+    return false;
+  }
+  for (let i = 0; i < script.customExclude.length; i += 1) {
+    if (script.customExclude[i] === `*://${host}*`) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // 用于popup页的脚本操作列表
 const ScriptMenuList: React.FC<{
   script: ScriptMenu[];
   isBackscript: boolean;
-}> = ({ script, isBackscript }) => {
+  currentUrl: string;
+}> = ({ script, isBackscript, currentUrl }) => {
   const [list, setList] = useState([] as ScriptMenu[]);
   const message = IoC.instance(MessageInternal) as MessageInternal;
   const scriptCtrl = IoC.instance(ScriptController) as ScriptController;
   const runtimeCtrl = IoC.instance(RuntimeController) as RuntimeController;
+  const systemConfig = IoC.instance(SystemConfig) as SystemConfig;
+  const [expandMenuIndex, setExpandMenuIndex] = useState<{
+    [key: string]: boolean;
+  }>({});
+  const { t } = useTranslation();
+
+  let url: URL;
+  try {
+    url = new URL(currentUrl);
+  } catch (e) {
+    // ignore error
+  }
   useEffect(() => {
     setList(script);
   }, [script]);
@@ -72,10 +104,13 @@ const ScriptMenuList: React.FC<{
     window.close();
   };
   // 监听菜单按键
+
+  // 菜单展开
+
   return (
     <>
       {list.length === 0 && <Empty />}
-      {list.map((item) => (
+      {list.map((item, index) => (
         <Collapse bordered={false} expandIconPosition="right" key={item.id}>
           <CollapseItem
             header={
@@ -84,6 +119,17 @@ const ScriptMenuList: React.FC<{
                 onClick={(e) => {
                   e.stopPropagation();
                 }}
+                title={
+                  // eslint-disable-next-line no-nested-ternary
+                  item.enable
+                    ? item.runNumByIframe
+                      ? t("script_total_runs", {
+                          runNum: item.runNum,
+                          runNumByIframe: item.runNumByIframe,
+                        })!
+                      : t("script_total_runs_single", { runNum: item.runNum })!
+                    : t("script_disabled")!
+                }
               >
                 <Space>
                   <Switch
@@ -113,13 +159,11 @@ const ScriptMenuList: React.FC<{
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
-                      color:
-                        item.runStatus &&
-                        item.runStatus !== SCRIPT_RUN_STATUS_RUNNING
-                          ? "rgb(var(--gray-5))"
-                          : "",
+                      color: item.runNum === 0 ? "rgb(var(--gray-5))" : "",
+                      lineHeight: "20px",
                     }}
                   >
+                    <ScriptIcons script={item} size={20} />
                     {item.name}
                   </span>
                 </Space>
@@ -149,8 +193,8 @@ const ScriptMenuList: React.FC<{
                   }}
                 >
                   {item.runStatus !== SCRIPT_RUN_STATUS_RUNNING
-                    ? "运行一次"
-                    : "停止"}
+                    ? t("run_once")
+                    : t("stop")}
                 </Button>
               )}
               <Button
@@ -165,15 +209,39 @@ const ScriptMenuList: React.FC<{
                   window.close();
                 }}
               >
-                编辑
+                {t("edit")}
               </Button>
+              {url && (
+                <Button
+                  className="text-left"
+                  status="warning"
+                  type="secondary"
+                  icon={<IconMinus />}
+                  onClick={() => {
+                    scriptCtrl
+                      .exclude(
+                        item.id,
+                        `*://${url.host}*`,
+                        isExclude(item, url.host)
+                      )
+                      .finally(() => {
+                        window.close();
+                      });
+                  }}
+                >
+                  {isExclude(item, url.host)
+                    ? t("exclude_on")
+                    : t("exclude_off")}
+                  {` ${url.host} ${t("exclude_execution")}`}
+                </Button>
+              )}
               <Popconfirm
-                title="确定要删除此脚本吗?"
+                title={t("confirm_delete_script")}
                 icon={<IconDelete />}
                 onOk={() => {
                   setList(list.filter((i) => i.id !== item.id));
                   scriptCtrl.delete(item.id).catch((e) => {
-                    Message.error(`删除失败: ${e}`);
+                    Message.error(`{t('delete_failed')}: ${e}`);
                   });
                 }}
               >
@@ -183,7 +251,7 @@ const ScriptMenuList: React.FC<{
                   type="secondary"
                   icon={<IconDelete />}
                 >
-                  删除
+                  {t("delete")}
                 </Button>
               </Popconfirm>
             </div>
@@ -192,7 +260,13 @@ const ScriptMenuList: React.FC<{
             className="arco-collapse-item-content-box flex flex-col"
             style={{ padding: "0 0 0 40px" }}
           >
-            {item.menus?.map((menu) => {
+            {/* 判断菜单数量，再判断是否展开 */}
+            {(item.menus && item.menus?.length > systemConfig.menuExpandNum
+              ? expandMenuIndex[index]
+                ? item.menus
+                : item.menus?.slice(0, systemConfig.menuExpandNum)
+              : item.menus
+            )?.map((menu) => {
               if (menu.accessKey) {
                 document.addEventListener("keypress", (e) => {
                   if (e.key.toUpperCase() === menu.accessKey!.toUpperCase()) {
@@ -215,6 +289,24 @@ const ScriptMenuList: React.FC<{
                 </Button>
               );
             })}
+            {item.menus && item.menus?.length > systemConfig.menuExpandNum && (
+              <Button
+                className="text-left"
+                key="expand"
+                type="secondary"
+                icon={
+                  expandMenuIndex[index] ? <IconCaretUp /> : <IconCaretDown />
+                }
+                onClick={() => {
+                  setExpandMenuIndex({
+                    ...expandMenuIndex,
+                    [index]: !expandMenuIndex[index],
+                  });
+                }}
+              >
+                {expandMenuIndex[index] ? t("collapse") : t("expand")}
+              </Button>
+            )}
             {item.hasUserConfig && (
               <Button
                 className="text-left"
@@ -229,7 +321,7 @@ const ScriptMenuList: React.FC<{
                   window.close();
                 }}
               >
-                用户配置
+                {t("user_config")}
               </Button>
             )}
           </div>

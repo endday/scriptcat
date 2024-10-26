@@ -24,6 +24,7 @@ import { IconSearch, IconUserAdd } from "@arco-design/web-react/icon";
 import { RefInputType } from "@arco-design/web-react/es/Input/interface";
 import { semTime } from "@App/pkg/utils/utils";
 import { RiDeleteBin5Fill } from "react-icons/ri";
+import { useTranslation } from "react-i18next"; // 添加了 react-i18next 的引用
 
 type ListType = Subscribe & { loading?: boolean };
 
@@ -34,6 +35,7 @@ function SubscribeList() {
   ) as SubscribeController;
   const [list, setList] = useState<ListType[]>([]);
   const inputRef = useRef<RefInputType>(null);
+  const { t } = useTranslation(); // 使用 useTranslation hook
 
   useEffect(() => {
     dao.table
@@ -53,19 +55,19 @@ function SubscribeList() {
       sorter: (a, b) => a.id - b.id,
     },
     {
-      title: "开启",
-      width: 100,
+      title: t("enable"),
+      width: t("subscribe_list_enable_width"),
       key: "enable",
       sorter(a, b) {
         return a.status - b.status;
       },
       filters: [
         {
-          text: "开启",
+          text: t("enable"),
           value: SUBSCRIBE_STATUS_ENABLE,
         },
         {
-          text: "关闭",
+          text: t("disable"),
           value: SUBSCRIBE_STATUS_DISABLE,
         },
       ],
@@ -101,9 +103,9 @@ function SubscribeList() {
       },
     },
     {
-      title: "名称",
+      title: t("name"),
       dataIndex: "name",
-      sorter: (a, b) => a.name.length - b.name.length,
+      sorter: (a, b) => a.name.localeCompare(b.name),
       filterIcon: <IconSearch />,
       key: "name",
       // eslint-disable-next-line react/no-unstable-nested-components
@@ -113,7 +115,7 @@ function SubscribeList() {
             <Input.Search
               ref={inputRef}
               searchButton
-              placeholder="请输入订阅名称"
+              placeholder={t("enter_subscribe_name")!}
               value={filterKeys[0] || ""}
               onChange={(value) => {
                 setFilterKeys(value ? [value] : []);
@@ -150,7 +152,7 @@ function SubscribeList() {
       },
     },
     {
-      title: "版本",
+      title: t("version"),
       dataIndex: "version",
       width: 120,
       align: "center",
@@ -160,7 +162,7 @@ function SubscribeList() {
       },
     },
     {
-      title: "权限",
+      title: t("permission"),
       width: 120,
       align: "center",
       key: "permission",
@@ -181,7 +183,7 @@ function SubscribeList() {
       },
     },
     {
-      title: "来源",
+      title: t("source"),
       width: 100,
       align: "center",
       key: "source",
@@ -190,7 +192,7 @@ function SubscribeList() {
           <Tooltip
             content={
               <p style={{ margin: 0, padding: 0 }}>
-                订阅地址: {decodeURIComponent(item.url)}
+                {t("subscribe_url")}: {decodeURIComponent(item.url)}
               </p>
             }
           >
@@ -202,18 +204,19 @@ function SubscribeList() {
                 cursor: "pointer",
               }}
             >
-              订阅地址
+              {t("subscribe_url")}
             </Tag>
           </Tooltip>
         );
       },
     },
     {
-      title: "最后更新",
+      title: t("last_updated"),
       dataIndex: "updatetime",
       align: "center",
       key: "updatetime",
-      width: 100,
+      width: t("script_list_last_updated_width"),
+      sorter: (a, b) => a.updatetime - b.updatetime,
       render(col, subscribe: Subscribe) {
         return (
           // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
@@ -224,7 +227,7 @@ function SubscribeList() {
             onClick={() => {
               Message.info({
                 id: "checkupdate",
-                content: "检查更新中...",
+                content: t("checking_for_updates"),
               });
               subscribeCtrl
                 .checkUpdate(subscribe.id)
@@ -232,19 +235,19 @@ function SubscribeList() {
                   if (res) {
                     Message.warning({
                       id: "checkupdate",
-                      content: "存在新版本",
+                      content: t("new_version_available"),
                     });
                   } else {
                     Message.success({
                       id: "checkupdate",
-                      content: "已是最新版本",
+                      content: t("latest_version"),
                     });
                   }
                 })
                 .catch((e) => {
                   Message.error({
                     id: "checkupdate",
-                    content: `检查更新失败: ${e.message}`,
+                    content: `${t("check_update_failed")}: ${e.message}`,
                   });
                 });
             }}
@@ -255,7 +258,7 @@ function SubscribeList() {
       },
     },
     {
-      title: "操作",
+      title: t("action"),
       width: 120,
       align: "center",
       key: "action",
@@ -263,12 +266,12 @@ function SubscribeList() {
         return (
           <Button.Group>
             <Popconfirm
-              title="确定要删除此订阅吗?相关的脚本也会进行删除"
+              title={t("confirm_delete_subscription")}
               icon={<RiDeleteBin5Fill />}
               onOk={() => {
                 setList(list.filter((val) => val.id !== item.id));
                 subscribeCtrl.delete(item.id).catch((e) => {
-                  Message.error(`删除失败: ${e}`);
+                  Message.error(`${t("delete_failed")}: ${e}`);
                 });
               }}
             >
@@ -289,7 +292,7 @@ function SubscribeList() {
 
   return (
     <Card
-      className="script-list"
+      className="script-list subscribe-list"
       style={{
         height: "100%",
         overflowY: "auto",
@@ -307,7 +310,7 @@ function SubscribeList() {
           hideOnSinglePage: true,
         }}
         style={{
-          minWidth: "1200px",
+          minWidth: "1100px",
         }}
       />
     </Card>

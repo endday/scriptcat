@@ -1,5 +1,8 @@
+import Cache from "@App/app/cache";
+import IoC from "@App/app/ioc";
+import { SystemConfig } from "@App/pkg/config/config";
 import { LinterWorker } from "@App/pkg/utils/monaco-editor";
-import { editor } from "monaco-editor";
+import { editor, Range } from "monaco-editor";
 import React, { useEffect, useImperativeHandle, useState } from "react";
 
 type Props = {
@@ -10,7 +13,8 @@ type Props = {
   // eslint-disable-next-line react/require-default-props
   editable?: boolean;
   id: string;
-  code: string;
+  // eslint-disable-next-line react/require-default-props
+  code?: string;
 };
 
 const CodeEditor: React.ForwardRefRenderFunction<
@@ -22,7 +26,7 @@ const CodeEditor: React.ForwardRefRenderFunction<
     editor: monacoEditor,
   }));
   useEffect(() => {
-    if (diffCode === undefined) {
+    if (diffCode === undefined || code === undefined) {
       return () => {};
     }
     let edit: editor.IStandaloneDiffEditor | editor.IStandaloneCodeEditor;
@@ -32,10 +36,6 @@ const CodeEditor: React.ForwardRefRenderFunction<
       const div = document.getElementById(id) as HTMLDivElement;
       if (diffCode) {
         edit = editor.createDiffEditor(div, {
-          theme:
-            document.body.getAttribute("arco-theme") === "dark"
-              ? "vs-dark"
-              : "vs",
           enableSplitViewResizing: false,
           renderSideBySide: false,
           folding: true,
@@ -45,6 +45,7 @@ const CodeEditor: React.ForwardRefRenderFunction<
           scrollBeyondLastLine: false,
           readOnly: true,
           diffWordWrap: "off",
+          glyphMargin: true,
         });
         edit.setModel({
           original: editor.createModel(diffCode, "javascript"),
@@ -63,6 +64,7 @@ const CodeEditor: React.ForwardRefRenderFunction<
           overviewRulerBorder: false,
           scrollBeyondLastLine: false,
           readOnly: !editable,
+          glyphMargin: true,
         });
         edit.setValue(code);
 
@@ -77,6 +79,10 @@ const CodeEditor: React.ForwardRefRenderFunction<
   }, [code, diffCode]);
 
   useEffect(() => {
+    const config = IoC.instance(SystemConfig) as SystemConfig;
+    if (!config.enableEslint) {
+      return () => {};
+    }
     if (!monacoEditor) {
       return () => {};
     }
@@ -92,6 +98,7 @@ const CodeEditor: React.ForwardRefRenderFunction<
         LinterWorker.sendLinterMessage({
           code: model.getValue(),
           id,
+          config: JSON.parse(config.eslintConfig),
         });
       }, 500);
     };
@@ -100,11 +107,108 @@ const CodeEditor: React.ForwardRefRenderFunction<
     model.onDidChangeContent(() => {
       lint();
     });
+
+    // 在行号旁显示ESLint错误/警告图标
+    const diffEslint = (
+      makers: {
+        startLineNumber: number;
+        endLineNumber: number;
+        severity: number;
+      }[]
+    ) => {
+      // 定义glyph class
+      const glyphMarginClassList = {
+        4: "icon-warn",
+        8: "icon-error",
+      };
+
+      // 先移除所有旧的Decorations
+      const oldDecorations = model
+        .getAllDecorations()
+        .filter(
+          (i) =>
+            i.options.glyphMarginClassName &&
+            Object.values(glyphMarginClassList).includes(
+              i.options.glyphMarginClassName
+            )
+        );
+      monacoEditor.removeDecorations(oldDecorations.map((i) => i.id));
+
+      /* 待改进 目前似乎monaco无法满足需求
+      // 获取所有ESLint ModelMarkers
+      const allMarkers = editor.getModelMarkers({ owner: "ESLint" });
+      */
+
+      // 再重新添加新的Decorations
+      monacoEditor.createDecorationsCollection(
+        makers.map(({ startLineNumber, endLineNumber, severity }) => ({
+          range: new Range(startLineNumber, 1, endLineNumber, 1),
+          options: {
+            isWholeLine: true,
+            // @ts-ignore
+            glyphMarginClassName: glyphMarginClassList[severity],
+
+            /* 待改进 目前monaco似乎无法满足需求
+            glyphMarginHoverMessage: allMarkers.reduce(
+              (prev: any, next: any) => {
+                if (
+                  next.startLineNumber === startLineNumber &&
+                  next.endLineNumber === endLineNumber
+                ) {
+                  prev.push({
+                    value: `${next.message} ESLinter [(${next.code.value})](${next.code.target})`,
+                    isTrusted: true,
+                  });
+                }
+                return prev;
+              },
+              []
+            ),
+            */
+          },
+        }))
+      );
+    };
+
     const handler = (message: any) => {
       if (id !== message.id) {
         return;
       }
       editor.setModelMarkers(model, "ESLint", message.markers);
+      const fix = new Map();
+      // 设置fix
+      message.markers.forEach(
+        (val: {
+          code: { value: any };
+          startLineNumber: any;
+          endLineNumber: any;
+          startColumn: any;
+          endColumn: any;
+          fix: any;
+        }) => {
+          if (val.fix) {
+            fix.set(
+              `${val.code.value}|${val.startLineNumber}|${val.endLineNumber}|${val.startColumn}|${val.endColumn}`,
+              val.fix
+            );
+          }
+        }
+      );
+      Cache.getInstance().set("eslint-fix", fix);
+
+      // 在行号旁显示ESLint错误/警告图标
+      const formatMarkers = message.markers.map(
+        ({
+          startLineNumber,
+          endLineNumber,
+          severity,
+        }: {
+          startLineNumber: number;
+          endLineNumber: number;
+          severity: number;
+        }) => ({ startLineNumber, endLineNumber, severity })
+      );
+      diffEslint(formatMarkers);
     };
     LinterWorker.hook.addListener("message", handler);
     return () => {

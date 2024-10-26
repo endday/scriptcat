@@ -8,7 +8,7 @@ import {
   SCRIPT_STATUS_ENABLE,
   ScriptDAO,
 } from "../../repo/scripts";
-import ScriptManager from "./manager";
+import ScriptManager, { InstallSource } from "./manager";
 
 export type ScriptEvent =
   | "upsert"
@@ -16,7 +16,12 @@ export type ScriptEvent =
   | "enable"
   | "disable"
   | "delete"
-  | "checkUpdate";
+  | "exclude"
+  | "resetExclude"
+  | "resetMatch"
+  | "updateCheckUpdateUrl"
+  | "checkUpdate"
+  | "importByUrl";
 
 const events: { [key: string]: (data: any) => Promise<any> } = {};
 
@@ -48,18 +53,26 @@ export default class ScriptEventListener {
 
   // 安装或者更新脚本,将数据保存到数据库
   @ListenEventDecorator("upsert")
-  public upsertHandler(
-    script: Script,
-    upsertBy: "user" | "system" | "sync" = "user"
-  ) {
+  public async upsertHandler(script: Script, upsertBy: InstallSource = "user") {
+    const logger = this.logger.with({
+      scriptId: script.id,
+      name: script.name,
+      uuid: script.uuid,
+      version: script.metadata.version[0],
+      upsertBy,
+    });
+    // 判断是否有selfMetedata
+    if (script.id) {
+      const oldScript = await this.dao.findById(script.id);
+      if (oldScript) {
+        script.selfMetadata = oldScript.selfMetadata;
+      }
+    }
+    // 判断一些undefined的字段
+    if (!script.config) {
+      script.config = undefined;
+    }
     return new Promise((resolve, reject) => {
-      const logger = this.logger.with({
-        scriptId: script.id,
-        name: script.name,
-        uuid: script.uuid,
-        version: script.metadata.version[0],
-        upsertBy,
-      });
       this.dao.save(script).then(
         () => {
           logger.info("script upsert success");
@@ -164,5 +177,176 @@ export default class ScriptEventListener {
   @ListenEventDecorator("checkUpdate")
   public checkUpdateHandler(id: number) {
     return this.manager.checkUpdate(id, "user");
+  }
+
+  @ListenEventDecorator("importByUrl")
+  public importByUrlHandler(url: string) {
+    return this.manager.openInstallPageByUrl(url);
+  }
+
+  @ListenEventDecorator("exclude")
+  public excludeHandler({
+    id,
+    exclude,
+    remove,
+  }: {
+    id: number;
+    exclude: string;
+    remove: boolean;
+  }) {
+    const logger = this.logger.with({ scriptId: id });
+    return new Promise((resolve, reject) => {
+      this.dao
+        .findById(id)
+        .then((script) => {
+          if (!script) {
+            return reject(new Error("脚本不存在"));
+          }
+          script.selfMetadata = script.selfMetadata || {};
+          const excludes =
+            script.selfMetadata.exclude || script.metadata.exclude || [];
+          if (remove) {
+            for (let i = 0; i < excludes.length; i += 1) {
+              if (excludes[i] === exclude) {
+                excludes.splice(i, 1);
+              }
+            }
+          } else {
+            excludes.push(exclude);
+          }
+          script.selfMetadata.exclude = excludes;
+          this.dao.save(script).then(
+            () => {
+              logger.info("script exclude success");
+              ScriptManager.hook.trigger("upsert", script, "system");
+              resolve({ id: script.id });
+            },
+            (e) => {
+              logger.error("script exclude failed", Logger.E(e));
+              reject(e);
+            }
+          );
+          return resolve(1);
+        })
+        .catch((e) => {
+          logger.error("exclude error", Logger.E(e));
+          reject(e);
+        });
+    });
+  }
+
+  @ListenEventDecorator("resetExclude")
+  public resetExcludeHandler({
+    id,
+    exclude,
+  }: {
+    id: number;
+    exclude: string[] | undefined;
+  }) {
+    const logger = this.logger.with({ scriptId: id });
+    return new Promise((resolve, reject) => {
+      this.dao
+        .findById(id)
+        .then((script) => {
+          if (!script) {
+            return reject(new Error("脚本不存在"));
+          }
+          script.selfMetadata = script.selfMetadata || {};
+          if (exclude) {
+            script.selfMetadata.exclude = exclude;
+          } else {
+            delete script.selfMetadata.exclude;
+          }
+          this.dao.save(script).then(
+            () => {
+              logger.info("script resetExclude success");
+              ScriptManager.hook.trigger("upsert", script, "system");
+              resolve({ id: script.id });
+            },
+            (e) => {
+              logger.error("script resetExclude failed", Logger.E(e));
+              reject(e);
+            }
+          );
+          return resolve(1);
+        })
+        .catch((e) => {
+          logger.error("resetMatch error", Logger.E(e));
+          reject(e);
+        });
+    });
+  }
+
+  @ListenEventDecorator("resetMatch")
+  public resetMatchHandler({
+    id,
+    match,
+  }: {
+    id: number;
+    match: string[] | undefined;
+  }) {
+    const logger = this.logger.with({ scriptId: id });
+    return new Promise((resolve, reject) => {
+      this.dao
+        .findById(id)
+        .then((script) => {
+          if (!script) {
+            return reject(new Error("脚本不存在"));
+          }
+          script.selfMetadata = script.selfMetadata || {};
+          if (match) {
+            script.selfMetadata.match = match;
+          } else {
+            delete script.selfMetadata.match;
+          }
+          this.dao.save(script).then(
+            () => {
+              logger.info("script resetMatch success");
+              ScriptManager.hook.trigger("upsert", script, "system");
+              resolve({ id: script.id });
+            },
+            (e) => {
+              logger.error("script resetMatch failed", Logger.E(e));
+              reject(e);
+            }
+          );
+          return resolve(1);
+        })
+        .catch((e) => {
+          logger.error("resetMatch error", Logger.E(e));
+          reject(e);
+        });
+    });
+  }
+
+  @ListenEventDecorator("updateCheckUpdateUrl")
+  public updateCheckUpdateUrlHandler({ id, url }: { id: number; url: string }) {
+    const logger = this.logger.with({ scriptId: id });
+    return new Promise((resolve, reject) => {
+      this.dao
+        .findById(id)
+        .then((script) => {
+          if (!script) {
+            return reject(new Error("脚本不存在"));
+          }
+          script.checkUpdateUrl = url;
+          script.downloadUrl = url;
+          this.dao.save(script).then(
+            () => {
+              logger.info("script updateCheckUpdateUrl success");
+              resolve({ id: script.id });
+            },
+            (e) => {
+              logger.error("script updateCheckUpdateUrl failed", Logger.E(e));
+              reject(e);
+            }
+          );
+          return resolve(1);
+        })
+        .catch((e) => {
+          logger.error("updateCheckUpdateUrl error", Logger.E(e));
+          reject(e);
+        });
+    });
   }
 }

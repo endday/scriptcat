@@ -116,6 +116,7 @@ describe("UrlMatch-port2", () => {
   url.add("http://test.list.ggnb.top:80/search", "ok1");
   url.add("http://test.list.ggnb.top*/search", "ok2");
   url.add("http://test.list.ggnb.top:*/search", "ok3");
+  url.add("http://localhost:3000/", "ok4");
   it("match1", () => {
     expect(url.match("http://test.list.ggnb.top:80/search")).toEqual([
       "ok1",
@@ -123,7 +124,6 @@ describe("UrlMatch-port2", () => {
       "ok3",
     ]);
     expect(url.match("http://test.list.ggnb.top:81/search")).toEqual([
-      "ok1",
       "ok2",
       "ok3",
     ]);
@@ -132,6 +132,30 @@ describe("UrlMatch-port2", () => {
       "ok2",
       "ok3",
     ]);
+  });
+  it("case2", () => {
+    expect(url.match("http://localhost:3000/")).toEqual(["ok4"]);
+    expect(url.match("http://localhost:8000/")).toEqual([]);
+  });
+});
+
+describe("特殊情况", () => {
+  it("**", () => {
+    const url = new UrlMatch<string>();
+    url.add("*://**/*", "ok1");
+    expect(url.match("http://www.example.com/")).toEqual(["ok1"]);
+  });
+
+  it("prefix *", () => {
+    const url = new UrlMatch<string>();
+    url.add("*https://www.baidu.com*", "ok1");
+    expect(url.match("https://www.baidu.com")).toEqual(["ok1"]);
+  });
+  it("http*", () => {
+    const url = new UrlMatch<string>();
+    url.add("http*://example.com/*", "ok1");
+    expect(url.match("https://example.com/")).toEqual(["ok1"]);
+    expect(url.match("http://example.com/")).toEqual(["ok1"]);
   });
 });
 
@@ -231,6 +255,9 @@ describe("UrlInclude-2", () => {
       )
     ).toEqual(["ok1", "ok2"]);
     expect(url.match("https://github.com/CodFrm")).toEqual(["ok1", "ok2"]);
+    url.add("http*://example.com/*", "ok3");
+    expect(url.match("https://example.com/")).toEqual(["ok1", "ok2", "ok3"]);
+    expect(url.match("http://example.com/")).toEqual(["ok1", "ok2", "ok3"]);
   });
   it("port", () => {
     const url = new UrlInclude<string>();

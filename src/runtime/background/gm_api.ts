@@ -13,11 +13,24 @@ import { isFirefox } from "@App/pkg/utils/utils";
 import Hook from "@App/app/service/hook";
 import IoC from "@App/app/ioc";
 import { SystemConfig } from "@App/pkg/config/config";
+import FileSystemFactory from "@Pkg/filesystem/factory";
+import FileSystem from "@Pkg/filesystem/filesystem";
+import { joinPath } from "@Pkg/filesystem/utils";
+import i18next from "i18next";
+import { i18nName } from "@App/locales/locales";
+import { isWarpTokenError } from "@Pkg/filesystem/error";
 import PermissionVerify, {
   ConfirmParam,
   IPermissionVerify,
 } from "./permission_verify";
-import { dealXhr, getIcon, listenerWebRequest, setXhrHeader } from "./utils";
+import {
+  dealFetch,
+  dealXhr,
+  getFetchHeader,
+  getIcon,
+  listenerWebRequest,
+  setXhrHeader,
+} from "./utils";
 
 // GMApi,处理脚本的GM API调用请求
 
@@ -106,6 +119,17 @@ export default class GMApi {
     if (this.permissionVerify instanceof PermissionVerify) {
       listenerWebRequest(this.systemConfig.scriptCatFlag);
     }
+    // 处理sandbox来的CAT_fetchBlob和CAT_createBlobUrl
+    this.message.setHandler("CAT_createBlobUrl", (_: string, blob: Blob) => {
+      const url = URL.createObjectURL(blob);
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+      }, 60 * 1000);
+      return Promise.resolve(url);
+    });
+    this.message.setHandler("CAT_fetchBlob", (_: string, url: string) => {
+      return fetch(url).then((data) => data.blob());
+    });
   }
 
   // 解析请求
@@ -139,6 +163,49 @@ export default class GMApi {
     return this.valueManager.setValue(request.script, key, value, sender);
   }
 
+  // 处理GM_xmlhttpRequest fetch的情况,先只处理ReadableStream的情况
+  // 且不考虑复杂的情况
+  CAT_fetch(request: Request, channel: Channel): Promise<any> {
+    const config = <GMSend.XHRDetails>request.params[0];
+    const { url } = config;
+    return fetch(url, {
+      method: config.method || "GET",
+      body: <any>config.data,
+      headers: getFetchHeader(this.systemConfig.scriptCatFlag, config),
+    })
+      .then((resp) => {
+        const send = dealFetch(
+          this.systemConfig.scriptCatFlag,
+          config,
+          resp,
+          1
+        );
+        const reader = resp.body?.getReader();
+        if (!reader) {
+          throw new Error("read is not found");
+        }
+        const { scriptCatFlag } = this.systemConfig;
+        reader.read().then(function read({ done, value }) {
+          if (done) {
+            const data = dealFetch(scriptCatFlag, config, resp, 4);
+            channel.send({ event: "onreadystatechange", data });
+            channel.send({ event: "onload", data });
+            channel.send({ event: "onloadend", data });
+            channel.disChannel();
+          } else {
+            channel.send({ event: "onstream", data: Array.from(value) });
+            reader.read().then(read);
+          }
+        });
+        channel.send({ event: "onloadstart", data: send });
+        send.readyState = 2;
+        channel.send({ event: "onreadystatechange", data: send });
+      })
+      .catch((e) => {
+        channel.throw(e);
+      });
+  }
+
   @PermissionVerify.API({
     confirm: (request: Request) => {
       const config = <GMSend.XHRDetails>request.params[0];
@@ -151,26 +218,29 @@ export default class GMApi {
           }
         }
       }
+      const metadata: { [key: string]: string } = {};
+      metadata[i18next.t("script_name")] = i18nName(request.script);
+      metadata[i18next.t("request_domain")] = url.hostname;
+      metadata[i18next.t("request_url")] = config.url;
+
       return Promise.resolve({
         permission: "cors",
         permissionValue: url.hostname,
-        title: "脚本正在试图访问跨域资源",
-        metadata: {
-          脚本名称: request.script.name,
-          请求域名: url.hostname,
-          请求地址: config.url,
-        },
-        describe:
-          "请您确认是否允许脚本进行此操作,脚本也可增加@connect标签跳过此选项",
+        title: i18next.t("script_accessing_cross_origin_resource"),
+        metadata,
+        describe: i18next.t("confirm_operation_description"),
         wildcard: true,
-        permissionContent: "域名",
+        permissionContent: i18next.t("domain"),
       } as ConfirmParam);
     },
     alias: ["GM.xmlHttpRequest"],
   })
   async GM_xmlhttpRequest(request: Request, channel: Channel): Promise<any> {
     const config = <GMSend.XHRDetails>request.params[0];
-
+    if (config.responseType === "stream") {
+      // 只有fetch支持ReadableStream
+      return this.CAT_fetch(request, channel);
+    }
     const xhr = new XMLHttpRequest();
     xhr.open(
       config.method || "GET",
@@ -402,10 +472,27 @@ export default class GMApi {
   GM_openInTab(request: Request, channel: Channel) {
     const url = request.params[0];
     const options = request.params[1] || {};
-    chrome.tabs.create({ url, active: options.active }, (tab) => {
-      Cache.getInstance().set(`GM_openInTab:${tab.id}`, channel);
-      channel.send({ event: "oncreate", tabId: tab.id });
-    });
+    if (options.useOpen === true) {
+      const newWindow = window.open(url);
+      if (newWindow) {
+        // 由于不符合同源策略无法直接监听newWindow关闭事件，因此改用CDP方法监听
+        // 由于window.open强制在前台打开标签，因此获取状态为{ active:true }的标签即为新标签
+        chrome.tabs.query({ active: true }, ([tab]) => {
+          Cache.getInstance().set(`GM_openInTab:${tab.id}`, channel);
+          channel.send({ event: "oncreate", tabId: tab.id });
+        });
+      } else {
+        // 当新tab被浏览器阻止时window.open()会返回null 视为已经关闭
+        // 似乎在Firefox中禁止在background页面使用window.open()，强制返回null
+        channel.send({ event: "onclose" });
+        channel.disChannel();
+      }
+    } else {
+      chrome.tabs.create({ url, active: options.active }, (tab) => {
+        Cache.getInstance().set(`GM_openInTab:${tab.id}`, channel);
+        channel.send({ event: "oncreate", tabId: tab.id });
+      });
+    }
   }
 
   @PermissionVerify.API({
@@ -548,7 +635,7 @@ export default class GMApi {
   @PermissionVerify.API({
     listener() {
       PermissionVerify.textarea.style.display = "none";
-      document.body.appendChild(PermissionVerify.textarea);
+      document.documentElement.appendChild(PermissionVerify.textarea);
       document.addEventListener("copy", (e: ClipboardEvent) => {
         if (!GMApi.clipboardData || !e.clipboardData) {
           return;
@@ -603,17 +690,16 @@ export default class GMApi {
           new Error("hostname must be in the definition of connect")
         );
       }
+      const metadata: { [key: string]: string } = {};
+      metadata[i18next.t("script_name")] = i18nName(request.script);
+      metadata[i18next.t("request_domain")] = url.host;
       return Promise.resolve({
         permission: "cookie",
         permissionValue: url.host,
-        title: "脚本正在试图访问网站cookie内容",
-        metadata: {
-          脚本名称: request.script.name,
-          请求域名: url.host,
-        },
-        describe:
-          "请您确认是否允许脚本进行此操作,cookie是一项重要的用户数据,请务必只给信任的脚本授权.",
-        permissionContent: "Cookie域",
+        title: i18next.t("access_cookie_content")!,
+        metadata,
+        describe: i18next.t("confirm_script_operation")!,
+        permissionContent: i18next.t("cookie_domain")!,
         uuid: "",
       });
     },
@@ -722,7 +808,6 @@ export default class GMApi {
     });
   }
 
-  // TODO: GM_registerMenuCommand
   @PermissionVerify.API()
   GM_registerMenuCommand(request: Request, channel: Channel) {
     GMApi.hook.trigger("registerMenu", request, channel);
@@ -735,5 +820,142 @@ export default class GMApi {
   @PermissionVerify.API()
   GM_unregisterMenuCommand(request: Request) {
     GMApi.hook.trigger("unregisterMenu", request.params[0], request);
+  }
+
+  @PermissionVerify.API()
+  CAT_userConfig(request: Request) {
+    chrome.tabs.create({
+      url: `/src/options.html#/?userConfig=${request.scriptId}`,
+      active: true,
+    });
+  }
+
+  @PermissionVerify.API({
+    confirm: (request: Request) => {
+      const [action, details] = request.params;
+      if (action === "config") {
+        return Promise.resolve(true);
+      }
+      const dir = details.baseDir ? details.baseDir : request.script.uuid;
+      const metadata: { [key: string]: string } = {};
+      metadata[i18next.t("script_name")] = i18nName(request.script);
+      return Promise.resolve({
+        permission: "file_storage",
+        permissionValue: dir,
+        title: i18next.t("script_operation_title"),
+        metadata,
+        describe: i18next.t("script_operation_description", { dir }),
+        wildcard: false,
+        permissionContent: i18next.t("script_permission_content"),
+      } as ConfirmParam);
+    },
+    alias: ["GM.xmlHttpRequest"],
+  })
+  // eslint-disable-next-line consistent-return
+  async CAT_fileStorage(request: Request, channel: Channel) {
+    const [action, details] = request.params;
+    if (action === "config") {
+      chrome.tabs.create({
+        url: `/src/options.html#/setting`,
+        active: true,
+      });
+      return Promise.resolve(true);
+    }
+    const fsConfig = this.systemConfig.catFileStorage;
+    if (fsConfig.status === "unset") {
+      return channel.throw({ code: 1, error: "file storage is disable" });
+    }
+    if (fsConfig.status === "error") {
+      return channel.throw({ code: 2, error: "file storge is error" });
+    }
+    let fs: FileSystem;
+    const baseDir = `ScriptCat/app/${
+      details.baseDir ? details.baseDir : request.script.uuid
+    }`;
+    try {
+      fs = await FileSystemFactory.create(
+        fsConfig.filesystem,
+        fsConfig.params[fsConfig.filesystem]
+      );
+      await FileSystemFactory.mkdirAll(fs, baseDir);
+      fs = await fs.openDir(baseDir);
+    } catch (e: any) {
+      if (isWarpTokenError(e)) {
+        fsConfig.status = "error";
+        this.systemConfig.catFileStorage = fsConfig;
+        return channel.throw({ code: 2, error: e.error.message });
+      }
+      return channel.throw({ code: 8, error: e.message });
+    }
+    switch (action) {
+      case "list":
+        fs.list()
+          .then((list) => {
+            list.forEach((file) => {
+              (<any>file).absPath = file.path;
+              file.path = joinPath(
+                file.path.substring(file.path.indexOf(baseDir) + baseDir.length)
+              );
+            });
+            channel.send({ action: "onload", data: list });
+            channel.disChannel();
+          })
+          .catch((e) => {
+            channel.throw({ code: 3, error: e.message });
+          });
+        break;
+      case "upload":
+        // eslint-disable-next-line no-case-declarations
+        const w = await fs.create(details.path);
+        w.write(await (await fetch(<string>details.data)).blob())
+          .then(() => {
+            channel.send({ action: "onload", data: true });
+            channel.disChannel();
+          })
+          .catch((e) => {
+            channel.throw({ code: 4, error: e.message });
+          });
+        break;
+      case "download":
+        // eslint-disable-next-line no-case-declarations, no-undef
+        const info = <CATType.FileStorageFileInfo>details.file;
+        fs = await fs.openDir(`${info.path}`);
+        // eslint-disable-next-line no-case-declarations
+        const r = await fs.open({
+          fsid: (<any>info).fsid,
+          name: info.name,
+          path: info.absPath,
+          size: info.size,
+          digest: info.digest,
+          createtime: info.createtime,
+          updatetime: info.updatetime,
+        });
+        r.read("blob")
+          .then((blob) => {
+            const url = URL.createObjectURL(blob);
+            setTimeout(() => {
+              URL.revokeObjectURL(url);
+            }, 6000);
+            channel.send({ action: "onload", data: url });
+            channel.disChannel();
+          })
+          .catch((e) => {
+            channel.throw({ code: 5, error: e.message });
+          });
+        break;
+      case "delete":
+        fs.delete(`${details.path}`)
+          .then(() => {
+            channel.send({ action: "onload", data: true });
+            channel.disChannel();
+          })
+          .catch((e) => {
+            channel.throw({ code: 6, error: e.message });
+          });
+        break;
+      default:
+        channel.disChannel();
+        break;
+    }
   }
 }

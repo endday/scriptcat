@@ -1,6 +1,7 @@
 import { MessageManager } from "@App/app/message/message";
 import { ScriptRunResouce } from "@App/app/repo/scripts";
 import { v4 as uuidv4 } from "uuid";
+import { has } from "@App/pkg/utils/lodash";
 import GMApi, { ApiValue, GMContext } from "./gm_api";
 
 // 构建脚本运行代码
@@ -16,7 +17,7 @@ export function compileScriptCode(scriptRes: ScriptRunResouce): string {
     });
   }
   code = require + code;
-  return `with (context) return (()=>{\n${code}\n//# sourceURL=${chrome.runtime.getURL(
+  return `with (context) return (async ()=>{\n${code}\n//# sourceURL=${chrome.runtime.getURL(
     `/${encodeURI(scriptRes.name)}.user.js`
   )}\n})()`;
 }
@@ -56,6 +57,7 @@ function setDepend(context: { [key: string]: any }, apiVal: ApiValue) {
 // 构建沙盒上下文
 export function createContext(
   scriptRes: ScriptRunResouce,
+  GMInfo: any,
   message: MessageManager
 ): GMApi {
   // 按照GMApi构建
@@ -70,7 +72,8 @@ export function createContext(
     connect: GMApi.prototype.connect,
     runFlag: uuidv4(),
     valueUpdate: GMApi.prototype.valueUpdate,
-    GM: {},
+    GM: { Info: GMInfo },
+    GM_info: GMInfo,
   };
   if (scriptRes.metadata.grant) {
     scriptRes.metadata.grant.forEach((val) => {
@@ -81,6 +84,24 @@ export function createContext(
       if (val.startsWith("GM.")) {
         const [, t] = val.split(".");
         (<{ [key: string]: any }>context.GM)[t] = api.api.bind(context);
+      } else if (val === "GM_cookie") {
+        // 特殊处理GM_cookie.list之类
+        context[val] = api.api.bind(context);
+        // eslint-disable-next-line func-names, camelcase
+        const GM_cookie = function (action: string) {
+          return (
+            details: GMTypes.CookieDetails,
+            done: (
+              cookie: GMTypes.Cookie[] | any,
+              error: any | undefined
+            ) => void
+          ) => {
+            return context[val](action, details, done);
+          };
+        };
+        context[val].list = GM_cookie("list");
+        context[val].delete = GM_cookie("delete");
+        context[val].set = GM_cookie("set");
       } else {
         context[val] = api.api.bind(context);
       }
@@ -91,105 +112,215 @@ export function createContext(
   return <GMApi>context;
 }
 
-const writables: { [key: string]: any } = {
-  addEventListener: global.addEventListener,
-  removeEventListener: global.removeEventListener,
-  dispatchEvent: global.dispatchEvent,
+export const writables: { [key: string]: any } = {
+  addEventListener: global.addEventListener.bind(global),
+  removeEventListener: global.removeEventListener.bind(global),
+  dispatchEvent: global.dispatchEvent.bind(global),
 };
 
-// 记录初始的
+// 记录初始的window字段
 export const init = new Map<string, boolean>();
+
+// 需要用到全局的
+export const unscopables: { [key: string]: boolean } = {
+  NodeFilter: true,
+  RegExp: true,
+};
 
 // 复制原有的,防止被前端网页复写
 const descs = Object.getOwnPropertyDescriptors(global);
 Object.keys(descs).forEach((key) => {
   const desc = descs[key];
+  // 可写但不在特殊配置writables中
   if (desc && desc.writable && !writables[key]) {
-    writables[key] = desc.value;
+    if (typeof desc.value === "function") {
+      // 判断是否需要bind，例如Object、Function这些就不需要bind
+      if (desc.value.prototype) {
+        writables[key] = desc.value;
+      } else {
+        writables[key] = desc.value.bind(global);
+      }
+    } else {
+      writables[key] = desc.value;
+    }
   } else {
     init.set(key, true);
   }
 });
 
+export function warpObject(thisContext: Object, ...context: Object[]) {
+  // 处理Object上的方法
+  thisContext.hasOwnProperty = (name: PropertyKey) => {
+    return (
+      Object.hasOwnProperty.call(thisContext, name) ||
+      context.some((val) => Object.hasOwnProperty.call(val, name))
+    );
+  };
+  thisContext.isPrototypeOf = (name: Object) => {
+    return (
+      Object.isPrototypeOf.call(thisContext, name) ||
+      context.some((val) => Object.isPrototypeOf.call(val, name))
+    );
+  };
+  thisContext.propertyIsEnumerable = (name: PropertyKey) => {
+    return (
+      Object.propertyIsEnumerable.call(thisContext, name) ||
+      context.some((val) => Object.propertyIsEnumerable.call(val, name))
+    );
+  };
+}
+
 // 拦截上下文
-export function proxyContext(global: any, context: any) {
+export function proxyContext(
+  global: any,
+  context: any,
+  thisContext?: { [key: string]: any }
+) {
   const special = Object.assign(writables);
+  // 处理某些特殊的属性
   // 后台脚本要不要考虑不能使用eval?
-  const thisContext: { [key: string]: any } = { eval: global.eval };
+  if (!thisContext) {
+    thisContext = {};
+  }
+  thisContext.eval = global.eval;
+  thisContext.define = undefined;
+  warpObject(thisContext, special, global, context);
+  // keyword是与createContext时同步的,避免访问到context的内部变量
+  const contextKeyword: { [key: string]: any } = {
+    message: 1,
+    valueChangeListener: 1,
+    connect: 1,
+    runFlag: 1,
+    valueUpdate: 1,
+    sendMessage: 1,
+    scriptRes: 1,
+  };
   // @ts-ignore
   const proxy = new Proxy(context, {
     defineProperty(_, name, desc) {
-      if (Object.defineProperty(context, name, desc)) {
+      if (Object.defineProperty(thisContext, name, desc)) {
         return true;
       }
       return false;
     },
-    get(_, name) {
+    get(_, name): any {
       switch (name) {
         case "window":
         case "self":
         case "globalThis":
           // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-          return special.global || proxy;
+          return proxy;
         case "top":
         case "parent":
           if (global[name] === global.self) {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-return
             return special.global || proxy;
           }
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-return
           return global.top;
         default:
           break;
       }
-      if (typeof name === "string" && name !== "undefined") {
-        if (context[name]) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-          return context[name];
-        }
-        if (thisContext[name]) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      if (name !== "undefined") {
+        if (has(thisContext, name)) {
+          // @ts-ignore
           return thisContext[name];
         }
-        if (special[name] !== undefined) {
-          if (
-            typeof special[name] === "function" &&
-            !(<{ prototype: any }>special[name]).prototype
-          ) {
-            return (<{ bind: any }>special[name]).bind(global);
+        if (typeof name === "string") {
+          if (has(context, name)) {
+            if (has(contextKeyword, name)) {
+              return undefined;
+            }
+            return context[name];
           }
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-          return special[name];
-        }
-        if (global[name] !== undefined) {
-          if (
-            typeof global[name] === "function" &&
-            !(<{ prototype: any }>global[name]).prototype
-          ) {
-            return (<{ bind: any }>global[name]).bind(global);
+          if (has(special, name)) {
+            if (
+              typeof special[name] === "function" &&
+              !(<{ prototype: any }>special[name]).prototype
+            ) {
+              return (<{ bind: any }>special[name]).bind(global);
+            }
+            return special[name];
           }
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-          return global[name];
+          if (has(global, name)) {
+            // 特殊处理onxxxx的事件
+            if (name.startsWith("on")) {
+              if (
+                typeof global[name] === "function" &&
+                !(<{ prototype: any }>global[name]).prototype
+              ) {
+                return (<{ bind: any }>global[name]).bind(global);
+              }
+              return global[name];
+            }
+          }
+          if (init.has(name)) {
+            const val = global[name];
+            if (
+              typeof val === "function" &&
+              !(<{ prototype: any }>val).prototype
+            ) {
+              return (<{ bind: any }>val).bind(global);
+            }
+            return val;
+          }
+        } else if (name === Symbol.unscopables) {
+          return unscopables;
         }
       }
       return undefined;
     },
     has(_, name) {
-      if (name === "GM_info") {
-        return false;
+      switch (name) {
+        case "window":
+        case "self":
+        case "globalThis":
+          return true;
+        case "top":
+        case "parent":
+          if (global[name] === global.self) {
+            return true;
+          }
+          return true;
+        default:
+          break;
       }
-      return true;
+      if (name !== "undefined") {
+        if (typeof name === "string") {
+          if (has(unscopables, name)) {
+            return false;
+          }
+          if (has(thisContext, name)) {
+            return true;
+          }
+          if (has(context, name)) {
+            if (has(contextKeyword, name)) {
+              return false;
+            }
+            return true;
+          }
+          if (has(special, name)) {
+            return true;
+          }
+          // 只处理onxxxx的事件
+          if (has(global[name], name)) {
+            if (name.startsWith("on")) {
+              return true;
+            }
+          }
+        } else if (typeof name === "symbol") {
+          return has(thisContext, name);
+        }
+      }
+      return false;
     },
     set(_, name: string, val) {
       switch (name) {
         case "window":
         case "self":
         case "globalThis":
-          special.global = val;
-          return true;
+          return false;
         default:
       }
-      if (special[name]) {
+      if (has(special, name)) {
         special[name] = val;
         return true;
       }
@@ -199,15 +330,31 @@ export function proxyContext(global: any, context: any) {
         if (des && des.get && !des.set && des.configurable) {
           return true;
         }
-        global[name] = val;
-        return true;
+        // 只处理onxxxx的事件
+        if (has(global, name) && name.startsWith("on")) {
+          if (val === undefined) {
+            global.removeEventListener(name.slice(2), thisContext[name]);
+          } else {
+            if (thisContext[name]) {
+              global.removeEventListener(name.slice(2), thisContext[name]);
+            }
+            global.addEventListener(name.slice(2), val);
+          }
+          thisContext[name] = val;
+          return true;
+        }
       }
-      context[name] = val;
+      // @ts-ignore
+      thisContext[name] = val;
       return true;
     },
     getOwnPropertyDescriptor(_, name) {
       try {
-        let ret = Object.getOwnPropertyDescriptor(context, name);
+        let ret = Object.getOwnPropertyDescriptor(thisContext, name);
+        if (ret) {
+          return ret;
+        }
+        ret = Object.getOwnPropertyDescriptor(context, name);
         if (ret) {
           return ret;
         }
@@ -218,6 +365,7 @@ export function proxyContext(global: any, context: any) {
       }
     },
   });
+  proxy[Symbol.toStringTag] = "Window";
   return proxy;
 }
 

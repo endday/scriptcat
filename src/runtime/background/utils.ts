@@ -1,11 +1,12 @@
 import LoggerCore from "@App/app/logger/core";
 import Logger from "@App/app/logger/logger";
 import { Channel } from "@App/app/message/channel";
-import { Script } from "@App/app/repo/scripts";
+import { SCRIPT_STATUS_ENABLE, Script } from "@App/app/repo/scripts";
 import { isFirefox } from "@App/pkg/utils/utils";
 import MessageCenter from "@App/app/message/center";
 import IoC from "@App/app/ioc";
 import { Request } from "./gm_api";
+import Runtime from "./runtime";
 
 export const unsafeHeaders: { [key: string]: boolean } = {
   // 部分浏览器中并未允许
@@ -64,6 +65,7 @@ export function listenerWebRequest(headerFlag: string) {
     respOpt.push("extraHeaders");
   }
   const maxRedirects = new Map<string, [number, number]>();
+  const isRedirects = new Map<string, boolean>();
   // 处理发送请求的unsafeHeaders
   chrome.webRequest.onBeforeSendHeaders.addListener(
     (details) => {
@@ -173,6 +175,40 @@ export function listenerWebRequest(headerFlag: string) {
   chrome.webRequest.onHeadersReceived.addListener(
     (details) => {
       if (!isExtensionRequest(details)) {
+        // 判断是否为页面请求
+        if (
+          !(details.type === "main_frame" || details.type === "sub_frame") ||
+          !isFirefox()
+        ) {
+          return {};
+        }
+        // 判断页面上是否有脚本会运行,如果有判断是否有csp,有则移除csp策略
+        const runtime = IoC.instance(Runtime) as Runtime;
+        // 这块代码与runtime里的pageLoad一样,考虑后面要不要优化
+        const result = runtime.matchUrl(details.url, (script) => {
+          // 如果是iframe,判断是否允许在iframe里运行
+          if (details.type === "sub_frame") {
+            if (script.metadata.noframes) {
+              return true;
+            }
+            return script.status !== SCRIPT_STATUS_ENABLE;
+          }
+          return script.status !== SCRIPT_STATUS_ENABLE;
+        });
+        if (result.length > 0 && details.responseHeaders) {
+          // 移除csp
+          for (let i = 0; i < details.responseHeaders.length; i += 1) {
+            if (
+              details.responseHeaders[i].name.toLowerCase() ===
+              "content-security-policy"
+            ) {
+              details.responseHeaders[i].value = "";
+            }
+          }
+          return {
+            responseHeaders: details.responseHeaders,
+          };
+        }
         return {};
       }
       const appendHeaders: chrome.webRequest.HttpHeader[] = [];
@@ -185,6 +221,7 @@ export function listenerWebRequest(headerFlag: string) {
         }
         // 处理最大重定向次数
         if (lowerCase === "location") {
+          isRedirects.set(details.requestId, true);
           const nums = maxRedirects.get(details.requestId);
           if (nums) {
             nums[0] += 1;
@@ -196,6 +233,13 @@ export function listenerWebRequest(headerFlag: string) {
         }
       });
       details.responseHeaders?.push(...appendHeaders);
+      // 判断是否为重定向请求,如果是,将url注入到finalUrl
+      if (isRedirects.has(details.requestId)) {
+        details.responseHeaders?.push({
+          name: `${headerFlag}-final-url`,
+          value: details.url,
+        });
+      }
       return {
         responseHeaders: details.responseHeaders,
       };
@@ -212,6 +256,7 @@ export function listenerWebRequest(headerFlag: string) {
       }
       // 删除最大重定向数缓存
       maxRedirects.delete(details.requestId);
+      isRedirects.delete(details.requestId);
     },
     { urls: ["<all_urls>"] }
   );
@@ -225,28 +270,35 @@ export function setXhrHeader(
 ) {
   xhr.setRequestHeader(`${headerFlag}-gm-xhr`, "true");
   if (config.headers) {
+    let hasOrigin = false;
     Object.keys(config.headers).forEach((key) => {
       const lowKey = key.toLowerCase();
-      if (
-        unsafeHeaders[lowKey] ||
-        lowKey.startsWith("sec-") ||
-        lowKey.startsWith("proxy-")
-      ) {
-        try {
+      if (lowKey === "origin") {
+        hasOrigin = true;
+      }
+      try {
+        if (
+          unsafeHeaders[lowKey] ||
+          lowKey.startsWith("sec-") ||
+          lowKey.startsWith("proxy-")
+        ) {
           xhr.setRequestHeader(
             `${headerFlag}-${lowKey}`,
             config.headers![key]!
           );
-        } catch (e) {
-          LoggerCore.getLogger(Logger.E(e)).error(
-            "GM XHR setRequestHeader error"
-          );
+        } else {
+          // 直接设置header
+          xhr.setRequestHeader(key, config.headers![key]!);
         }
-      } else {
-        // 直接设置header
-        xhr.setRequestHeader(key, config.headers![key]!);
+      } catch (e) {
+        LoggerCore.getLogger(Logger.E(e)).error(
+          "GM XHR setRequestHeader error"
+        );
       }
     });
+    if (!hasOrigin) {
+      xhr.setRequestHeader(`${headerFlag}-origin`, "");
+    }
   }
   if (config.maxRedirects !== undefined) {
     xhr.setRequestHeader(
@@ -255,11 +307,50 @@ export function setXhrHeader(
     );
   }
   if (config.cookie) {
-    xhr.setRequestHeader(`${headerFlag}-cookie`, config.cookie);
+    try {
+      xhr.setRequestHeader(`${headerFlag}-cookie`, config.cookie);
+    } catch (e) {
+      LoggerCore.getLogger(Logger.E(e)).error(
+        "GM XHR setRequestHeader cookie error"
+      );
+    }
   }
   if (config.anonymous) {
     xhr.setRequestHeader(`${headerFlag}-anonymous`, "true");
   }
+}
+
+export function getFetchHeader(
+  headerFlag: string,
+  config: GMSend.XHRDetails
+): any {
+  const headers: { [key: string]: string } = {};
+  headers[`${headerFlag}-gm-xhr`] = "true";
+  if (config.headers) {
+    Object.keys(config.headers).forEach((key) => {
+      const lowKey = key.toLowerCase();
+      if (
+        unsafeHeaders[lowKey] ||
+        lowKey.startsWith("sec-") ||
+        lowKey.startsWith("proxy-")
+      ) {
+        headers[`${headerFlag}-${lowKey}`] = config.headers![key]!;
+      } else {
+        // 直接设置header
+        headers[key] = config.headers![key]!;
+      }
+    });
+  }
+  if (config.maxRedirects !== undefined) {
+    headers[`${headerFlag}-max-redirects`] = config.maxRedirects.toString();
+  }
+  if (config.cookie) {
+    headers[`${headerFlag}-cookie`] = config.cookie;
+  }
+  if (config.anonymous) {
+    headers[`${headerFlag}-anonymous`] = "true";
+  }
+  return headers;
 }
 
 export async function dealXhr(
@@ -267,9 +358,15 @@ export async function dealXhr(
   config: GMSend.XHRDetails,
   xhr: XMLHttpRequest
 ): Promise<GMTypes.XHRResponse> {
+  let finalUrl = xhr.responseURL || config.url;
+  // 判断是否有headerFlag-final-url,有则替换finalUrl
+  const finalUrlHeader = xhr.getResponseHeader(`${headerFlag}-final-url`);
+  if (finalUrlHeader) {
+    finalUrl = finalUrlHeader;
+  }
   const removeXCat = new RegExp(`${headerFlag}-`, "g");
   const respond: GMTypes.XHRResponse = {
-    finalUrl: xhr.responseURL || config.url,
+    finalUrl,
     readyState: <any>xhr.readyState,
     status: xhr.status,
     statusText: xhr.statusText,
@@ -320,13 +417,36 @@ export async function dealXhr(
         LoggerCore.getLogger(Logger.E(e)).error("GM XHR response error");
       }
       try {
-        respond.responseText = xhr.responseText;
+        respond.responseText = xhr.responseText || undefined;
       } catch (e) {
         LoggerCore.getLogger(Logger.E(e)).error("GM XHR getResponseText error");
       }
     }
   }
   return Promise.resolve(respond);
+}
+
+export function dealFetch(
+  headerFlag: string,
+  config: GMSend.XHRDetails,
+  response: Response,
+  readyState: 0 | 1 | 2 | 3 | 4
+) {
+  const removeXCat = new RegExp(`${headerFlag}-`, "g");
+  let respHeader = "";
+  response.headers &&
+    response.headers.forEach((value, key) => {
+      respHeader += `${key.replace(removeXCat, "")}: ${value}\n`;
+    });
+  const respond: GMTypes.XHRResponse = {
+    finalUrl: response.url || config.url,
+    readyState,
+    status: response.status,
+    statusText: response.statusText,
+    responseHeaders: respHeader,
+    responseType: config.responseType,
+  };
+  return respond;
 }
 
 export function getIcon(script: Script): string {
@@ -352,7 +472,7 @@ function genScriptMenuByTabMap(
     menuArr.forEach((menu) => {
       // 创建菜单
       chrome.contextMenus.create({
-        id: `scriptMenu_menu_${menu.request.params[0]}`,
+        id: `scriptMenu_menu_${scriptId}_${menu.request.params[0]}`,
         title: menu.request.params[1],
         contexts: ["all"],
         parentId: `scriptMenu_${scriptId}`,
@@ -392,21 +512,24 @@ export function genScriptMenu(
 ) {
   // 移除之前所有的菜单
   chrome.contextMenus.removeAll();
+  const tabMap = scriptMenu.get(tabId);
+  const backTabMap = scriptMenu.get("sandbox");
+  if (!tabMap && !backTabMap) {
+    return;
+  }
   // 创建根菜单
   chrome.contextMenus.create({
     id: "scriptMenu",
     title: "ScriptCat",
     contexts: ["all"],
   });
-  let tabMap = scriptMenu.get(tabId);
   if (tabMap) {
     genScriptMenuByTabMap(tabMap);
   }
   // 后台脚本的菜单
   if (tabId !== "sandbox") {
-    tabMap = scriptMenu.get("sandbox");
-    if (tabMap) {
-      genScriptMenuByTabMap(tabMap);
+    if (backTabMap) {
+      genScriptMenuByTabMap(backTabMap);
     }
   }
 }

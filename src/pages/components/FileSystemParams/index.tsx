@@ -4,10 +4,21 @@ import FileSystemFactory, { FileSystemType } from "@Pkg/filesystem/factory";
 
 const fsParams = FileSystemFactory.params();
 
-const fileSystemList = [
+const fileSystemList: {
+  key: FileSystemType;
+  name: string;
+}[] = [
   {
     key: "webdav",
     name: "WebDAV",
+  },
+  {
+    key: "baidu-netdsik",
+    name: "百度网盘",
+  },
+  {
+    key: "onedrive",
+    name: "OneDrive",
   },
 ];
 const FileSystemParams: React.FC<{
@@ -30,7 +41,7 @@ const FileSystemParams: React.FC<{
       <Space>
         {preNode}
         <Select
-          value="webdav"
+          value={fileSystemType}
           style={{ width: 120 }}
           onChange={(value) => {
             onChangeFileSystemType(value as FileSystemType);
@@ -73,6 +84,20 @@ const FileSystemParams: React.FC<{
                     </Select.Option>
                   ))}
                 </Select>
+              </>
+            )}
+            {fsParams[fileSystemType][key].type === "password" && (
+              <>
+                <span>{fsParams[fileSystemType][key].title}</span>
+                <Input.Password
+                  value={fileSystemParams[key]}
+                  onChange={(value) => {
+                    onChangeFileSystemParams({
+                      ...fileSystemParams,
+                      [key]: value,
+                    });
+                  }}
+                />
               </>
             )}
             {!fsParams[fileSystemType][key].type && (

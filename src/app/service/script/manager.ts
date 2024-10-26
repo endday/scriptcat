@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from "uuid";
 import { fetchScriptInfo, prepareScriptByCode } from "@App/pkg/utils/script";
 import Cache from "@App/app/cache";
 import CacheKey from "@App/pkg/utils/cache_key";
@@ -6,13 +7,17 @@ import IoC from "@App/app/ioc";
 import LoggerCore from "@App/app/logger/core";
 import Logger from "@App/app/logger/logger";
 import { SystemConfig } from "@App/pkg/config/config";
-import { checkSilenceUpdate, ltever } from "@App/pkg/utils/utils";
+import {
+  checkSilenceUpdate,
+  ltever,
+  openInCurrentTab,
+} from "@App/pkg/utils/utils";
 import Manager from "../manager";
 import { Script, SCRIPT_STATUS_DISABLE, ScriptDAO } from "../../repo/scripts";
 import ScriptEventListener from "./event";
 import Hook from "../hook";
 
-export type InstallSource = "user" | "system" | "sync" | "subscribe";
+export type InstallSource = "user" | "system" | "sync" | "subscribe" | "vscode";
 
 // 脚本管理器,负责脚本实际的安装、卸载、更新等操作
 @IoC.Singleton(MessageHander, SystemConfig)
@@ -52,6 +57,9 @@ export class ScriptManager extends Manager {
     // 启动脚本检查更新
     // 十分钟对符合要求的脚本进行检查更新
     setInterval(() => {
+      if (!this.systemConfig.checkScriptUpdateCycle) {
+        return;
+      }
       this.logger.debug("start check update");
       this.scriptDAO.table
         .where("checktime")
@@ -84,15 +92,19 @@ export class ScriptManager extends Manager {
         if (hash.indexOf("bypass=true") !== -1) {
           return {};
         }
-        ScriptManager.openInstallPage(req);
+        this.openInstallPage(req);
         // eslint-disable-next-line no-script-url
         return { redirectUrl: "javascript:void 0" };
       },
       {
         urls: [
           "*://*/*.user.js",
+          "*://*/*.user.js?*",
           "https://*/*.user.sub.js",
+          "https://*/*.user.sub.js?*",
           "https://*/*.user.bg.js",
+          "https://*/*.user.bg.js?*",
+          "file:///*/*.user.js",
         ],
         types: ["main_frame"],
       },
@@ -100,23 +112,23 @@ export class ScriptManager extends Manager {
     );
   }
 
-  public static openInstallPage(req: chrome.webRequest.WebRequestBodyDetails) {
-    fetchScriptInfo(req.url, "user", false)
-      .then((info) => {
-        Cache.getInstance().set(CacheKey.scriptInfo(info.uuid), info);
-        setTimeout(() => {
-          // 清理缓存
-          Cache.getInstance().del(CacheKey.scriptInfo(info.uuid));
-        }, 60 * 1000);
-        chrome.tabs.create({
-          url: `/src/install.html?uuid=${info.uuid}`,
-        });
-      })
-      .catch(() => {
-        chrome.tabs.update(req.tabId, {
-          url: `${req.url}#bypass=true`,
-        });
+  public openInstallPage(req: chrome.webRequest.WebRequestBodyDetails) {
+    this.openInstallPageByUrl(req.url).catch(() => {
+      chrome.tabs.update(req.tabId, {
+        url: `${req.url}#bypass=true`,
       });
+    });
+  }
+
+  public openInstallPageByUrl(url: string) {
+    return fetchScriptInfo(url, "user", false, uuidv4()).then((info) => {
+      Cache.getInstance().set(CacheKey.scriptInfo(info.uuid), info);
+      setTimeout(() => {
+        // 清理缓存
+        Cache.getInstance().del(CacheKey.scriptInfo(info.uuid));
+      }, 60 * 1000);
+      openInCurrentTab(`/src/install.html?uuid=${info.uuid}`);
+    });
   }
 
   public async checkUpdate(id: number, source: "user" | "system") {
@@ -134,7 +146,12 @@ export class ScriptManager extends Manager {
       name: script.name,
     });
     try {
-      const info = await fetchScriptInfo(script.checkUpdateUrl, source, false);
+      const info = await fetchScriptInfo(
+        script.checkUpdateUrl,
+        source,
+        false,
+        script.uuid
+      );
       const { metadata } = info;
       if (!metadata) {
         logger.error("parse metadata failed");
@@ -170,24 +187,29 @@ export class ScriptManager extends Manager {
       downloadUrl: script.downloadUrl,
       checkUpdateUrl: script.checkUpdateUrl,
     });
-    fetchScriptInfo(script.downloadUrl || script.checkUpdateUrl!, source, true)
+    fetchScriptInfo(
+      script.downloadUrl || script.checkUpdateUrl!,
+      source,
+      true,
+      script.uuid
+    )
       .then(async (info) => {
         // 是否静默更新
         if (this.systemConfig.silenceUpdateScript) {
           try {
-            const newScript = await prepareScriptByCode(
+            const prepareScript = await prepareScriptByCode(
               info.code,
               script.downloadUrl || script.checkUpdateUrl!,
               script.uuid
             );
             if (
               checkSilenceUpdate(
-                newScript.oldScript!.metadata,
-                newScript.metadata
+                prepareScript.oldScript!.metadata,
+                prepareScript.script.metadata
               )
             ) {
               logger.info("silence update script");
-              this.event.upsertHandler(newScript);
+              this.event.upsertHandler(prepareScript.script);
               return;
             }
           } catch (e) {
@@ -196,7 +218,7 @@ export class ScriptManager extends Manager {
         }
         Cache.getInstance().set(CacheKey.scriptInfo(info.uuid), info);
         chrome.tabs.create({
-          url: `src/install.html?uuid=${info.uuid}`,
+          url: `/src/install.html?uuid=${info.uuid}`,
         });
       })
       .catch((e) => {
@@ -210,11 +232,11 @@ export class ScriptManager extends Manager {
     source: InstallSource,
     subscribeUrl?: string
   ) {
-    const info = await fetchScriptInfo(url, "system", false);
-    const script = await prepareScriptByCode(info.code, url, info.uuid);
-    script.subscribeUrl = subscribeUrl;
-    await this.event.upsertHandler(script, "system");
-    return Promise.resolve(script);
+    const info = await fetchScriptInfo(url, source, false, uuidv4());
+    const prepareScript = await prepareScriptByCode(info.code, url, info.uuid);
+    prepareScript.script.subscribeUrl = subscribeUrl;
+    await this.event.upsertHandler(prepareScript.script, source);
+    return Promise.resolve(prepareScript.script);
   }
 }
 

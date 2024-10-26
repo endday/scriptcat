@@ -2,9 +2,12 @@ import IoC from "@App/app/ioc";
 import MessageCenter from "@App/app/message/center";
 import MessageInternal from "@App/app/message/internal";
 import { MessageHander } from "@App/app/message/message";
+import { Message } from "@arco-design/web-react";
 import Hook from "@App/app/service/hook";
 import { FileSystemType } from "@Pkg/filesystem/factory";
 import ChromeStorage from "./chrome_storage";
+// @ts-ignore
+import { defaultConfig } from "../../../eslint/linter-config";
 
 export const SystamConfigChange = "systemConfigChange";
 
@@ -15,17 +18,25 @@ export type CloudSyncConfig = {
   params: { [key: string]: any };
 };
 
+export type CATFileStorage = {
+  filesystem: FileSystemType;
+  params: { [key: string]: any };
+  status: "unset" | "success" | "error";
+};
+
 @IoC.Singleton(MessageHander)
 export class SystemConfig {
   static hook = new Hook<"update">();
 
   public cache = new Map<string, any>();
 
-  public storage = new ChromeStorage("system", chrome.storage.sync);
+  public storage = new ChromeStorage("system", true);
 
   public message?: MessageCenter;
 
   public internal?: MessageInternal;
+
+  private loadOk = false;
 
   constructor(message: MessageHander) {
     if (message instanceof MessageCenter) {
@@ -43,6 +54,23 @@ export class SystemConfig {
       if (!this.cache.has(key)) {
         this.cache.set(key, list[key]);
       }
+    });
+    this.loadOk = true;
+  }
+
+  // 由于加载数据是异步,需要等待数据加载完成
+  public awaitLoad(): Promise<SystemConfig> {
+    return new Promise((resolve) => {
+      if (this.loadOk) {
+        resolve(this);
+        return;
+      }
+      const timer = setInterval(() => {
+        if (this.loadOk) {
+          clearInterval(timer);
+          resolve(this);
+        }
+      }, 100);
     });
   }
 
@@ -85,7 +113,10 @@ export class SystemConfig {
 
   // 检查更新周期,单位为秒
   public get checkScriptUpdateCycle(): number {
-    return <number>this.cache.get("check_script_update_cycle") || 86400;
+    if (this.cache.get("check_script_update_cycle") === undefined) {
+      return 86400;
+    }
+    return <number>this.cache.get("check_script_update_cycle");
   }
 
   public set checkScriptUpdateCycle(n: number) {
@@ -171,11 +202,82 @@ export class SystemConfig {
     this.set("cloud_sync", data);
   }
 
+  get catFileStorage(): CATFileStorage {
+    return (
+      this.cache.get("cat_file_storage") || {
+        status: "unset",
+        filesystem: "webdav",
+        params: {},
+      }
+    );
+  }
+
+  set catFileStorage(data: CATFileStorage | undefined) {
+    this.set("cat_file_storage", data);
+  }
+
   get scriptCatFlag() {
     return <string>this.cache.get("script_cat_flag");
   }
 
   set scriptCatFlag(val: string) {
     this.set("script_cat_flag", val);
+  }
+
+  get enableEslint() {
+    return <boolean>this.cache.get("enable_eslint");
+  }
+
+  set enableEslint(val: boolean) {
+    this.set("enable_eslint", val);
+  }
+
+  get eslintConfig() {
+    return <string>this.cache.get("eslint_config") || defaultConfig;
+  }
+
+  set eslintConfig(v: string) {
+    if (v === "") {
+      this.set("eslint_config", v);
+      Message.success("ESLint规则已重置");
+      return;
+    }
+    try {
+      JSON.parse(v);
+      this.set("eslint_config", v);
+      Message.success("ESLint规则已保存");
+    } catch (err: any) {
+      Message.error(err.toString());
+    }
+  }
+
+  // 日志清理周期
+  get logCleanCycle() {
+    return <number>this.cache.get("log_clean_cycle") || 7;
+  }
+
+  set logCleanCycle(val: number) {
+    this.set("log_clean_cycle", val);
+  }
+
+  // 设置脚本列表列宽度
+  get scriptListColumnWidth() {
+    return (
+      <{ [key: string]: number }>this.cache.get("script_list_column_width") ||
+      {}
+    );
+  }
+
+  set scriptListColumnWidth(val: { [key: string]: number }) {
+    this.set("script_list_column_width", val);
+  }
+
+  // 展开菜单数
+  get menuExpandNum() {
+    return <number>this.cache.get("menu_expand_num") || 5;
+  }
+
+  set menuExpandNum(val: number) {
+    this.set("menu_expand_num", val);
   }
 }

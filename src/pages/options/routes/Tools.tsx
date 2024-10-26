@@ -2,6 +2,7 @@ import React, { useRef, useState } from "react";
 import {
   Button,
   Card,
+  Checkbox,
   Drawer,
   Empty,
   Input,
@@ -18,6 +19,10 @@ import { SystemConfig } from "@App/pkg/config/config";
 import { File, FileReader } from "@Pkg/filesystem/filesystem";
 import { formatUnixTime } from "@App/pkg/utils/utils";
 import FileSystemParams from "@App/pages/components/FileSystemParams";
+import { IconQuestionCircleFill } from "@arco-design/web-react/icon";
+import { RefInputType } from "@arco-design/web-react/es/Input/interface";
+import { useTranslation } from "react-i18next";
+import SystemController from "@App/app/service/system/controller";
 
 function Tools() {
   const [loading, setLoading] = useState<{ [key: string]: boolean }>({});
@@ -31,17 +36,23 @@ function Tools() {
     [key: string]: any;
   }>(systemConfig.backup.params[fileSystemType] || {});
   const [backupFileList, setBackupFileList] = useState<File[]>([]);
+  const vscodeRef = useRef<RefInputType>(null);
+  const { t } = useTranslation();
 
   return (
     <Space
+      className="tools"
       direction="vertical"
       style={{
         width: "100%",
+        height: "100%",
+        overflow: "auto",
+        position: "relative",
       }}
     >
-      <Card title="备份" bordered={false}>
+      <Card className="backup" title={t("backup")} bordered={false}>
         <Space direction="vertical">
-          <Title heading={6}>本地</Title>
+          <Title heading={6}>{t("local")}</Title>
           <Space>
             <input
               type="file"
@@ -58,7 +69,7 @@ function Tools() {
                 setLoading((prev) => ({ ...prev, local: false }));
               }}
             >
-              导出文件
+              {t("export_file")}
             </Button>
             <Button
               type="primary"
@@ -66,19 +77,19 @@ function Tools() {
                 syncCtrl
                   .openImportFile(fileRef.current!)
                   .then(() => {
-                    Message.success("请在新页面中选择要导入的脚本");
+                    Message.success(t("select_import_script")!);
                   })
                   .then((e) => {
-                    Message.error(`导入错误${e}`);
+                    Message.error(`${t("import_error")}${e}`);
                   });
               }}
             >
-              导入文件
+              {t("import_file")}
             </Button>
           </Space>
-          <Title heading={6}>云端</Title>
+          <Title heading={6}>{t("cloud")}</Title>
           <FileSystemParams
-            preNode="备份至"
+            preNode={t("backup_to")}
             onChangeFileSystemType={(type) => {
               setFilesystemType(type);
             }}
@@ -91,7 +102,7 @@ function Tools() {
                 type="primary"
                 loading={loading.cloud}
                 onClick={() => {
-                  // 储存参数
+                  // Store parameters
                   const params = { ...systemConfig.backup.params };
                   params[fileSystemType] = fileSystemParams;
                   systemConfig.backup = {
@@ -99,21 +110,21 @@ function Tools() {
                     params,
                   };
                   setLoading((prev) => ({ ...prev, cloud: true }));
-                  Message.info("正在准备备份到云端");
+                  Message.info(t("preparing_backup")!);
                   syncCtrl
                     .backupToCloud(fileSystemType, fileSystemParams)
                     .then(() => {
-                      Message.success("备份成功");
+                      Message.success(t("backup_success")!);
                     })
                     .catch((e) => {
-                      Message.error(`备份失败: ${e}`);
+                      Message.error(`${t("backup_failed")}: ${e}`);
                     })
                     .finally(() => {
                       setLoading((prev) => ({ ...prev, cloud: false }));
                     });
                 }}
               >
-                备份
+                {t("backup")}
               </Button>,
               <Button
                 key="list"
@@ -125,21 +136,21 @@ function Tools() {
                   );
                   try {
                     fs = await fs.openDir("ScriptCat");
-                    const list = await fs.list();
+                    let list = await fs.list();
                     list.sort((a, b) => b.updatetime - a.updatetime);
-                    // 过滤掉非zip文件
-                    list.filter((file) => file.name.endsWith(".zip"));
+                    // Filter non-zip files
+                    list = list.filter((file) => file.name.endsWith(".zip"));
                     if (list.length === 0) {
-                      Message.info("没有备份文件");
+                      Message.info(t("no_backup_files")!);
                       return;
                     }
                     setBackupFileList(list);
                   } catch (e) {
-                    Message.error(`获取备份文件失败: ${e}`);
+                    Message.error(`${t("get_backup_files_failed")}: ${e}`);
                   }
                 }}
               >
-                备份列表
+                {t("backup_list")}
               </Button>,
             ]}
             fileSystemType={fileSystemType}
@@ -147,7 +158,32 @@ function Tools() {
           />
           <Drawer
             width={400}
-            title={<span>备份列表</span>}
+            title={
+              <div className="flex flex-row justify-between w-full gap-10">
+                <span>{t("backup_list")}</span>
+                <Button
+                  type="secondary"
+                  size="mini"
+                  onClick={async () => {
+                    let fs = await FileSystemFactory.create(
+                      fileSystemType,
+                      fileSystemParams
+                    );
+                    try {
+                      fs = await fs.openDir("ScriptCat");
+                      const url = await fs.getDirUrl();
+                      if (url) {
+                        window.open(url, "_black");
+                      }
+                    } catch (e) {
+                      Message.error(`${t("get_backup_dir_url_failed")}: ${e}`);
+                    }
+                  }}
+                >
+                  {t("open_backup_dir")}
+                </Button>
+              </div>
+            }
             visible={backupFileList.length !== 0}
             onOk={() => {
               setBackupFileList([]);
@@ -170,18 +206,19 @@ function Tools() {
                       type="primary"
                       size="small"
                       onClick={async () => {
-                        Message.info("正在从云端拉取数据");
-                        const fs = await FileSystemFactory.create(
+                        Message.info(t("pulling_data_from_cloud")!);
+                        let fs = await FileSystemFactory.create(
                           fileSystemType,
                           fileSystemParams
                         );
                         let file: FileReader;
                         let data: Blob;
                         try {
-                          file = await fs.open(item.name);
+                          fs = await fs.openDir("ScriptCat");
+                          file = await fs.open(item);
                           data = (await file.read("blob")) as Blob;
                         } catch (e) {
-                          Message.error(`拉取失败: ${e}`);
+                          Message.error(`${t("pull_failed")}: ${e}`);
                           return;
                         }
                         const url = URL.createObjectURL(data);
@@ -191,14 +228,14 @@ function Tools() {
                         syncCtrl
                           .openImportWindow(item.name, url)
                           .then(() => {
-                            Message.success("请在新页面中选择要导入的脚本");
+                            Message.success(t("select_import_script")!);
                           })
                           .then((e) => {
-                            Message.error(`导入错误${e}`);
+                            Message.error(`${t("import_error")}${e}`);
                           });
                       }}
                     >
-                      恢复
+                      {t("restore")}
                     </Button>
                     <Button
                       type="primary"
@@ -206,44 +243,100 @@ function Tools() {
                       size="small"
                       onClick={() => {
                         Modal.confirm({
-                          title: "确认删除",
-                          content: `确认删除备份文件${item.name}?`,
+                          title: t("confirm_delete"),
+                          content: `${t("confirm_delete_backup_file")}${
+                            item.name
+                          }?`,
                           onOk: async () => {
-                            const fs = await FileSystemFactory.create(
+                            let fs = await FileSystemFactory.create(
                               fileSystemType,
                               fileSystemParams
                             );
                             try {
+                              fs = await fs.openDir("ScriptCat");
                               await fs.delete(item.name);
                               setBackupFileList(
                                 backupFileList.filter(
                                   (i) => i.name !== item.name
                                 )
                               );
-                              Message.success("删除成功");
+                              Message.success(t("delete_success")!);
                             } catch (e) {
-                              Message.error(`删除失败${e}`);
+                              Message.error(`${t("delete_failed")}${e}`);
                             }
                           },
                         });
                       }}
                     >
-                      删除
+                      {t("delete")}
                     </Button>
                   </Space>
                 </List.Item>
               )}
             />
           </Drawer>
-          <Title heading={6}>备份策略</Title>
-          <Empty description="建设中" />
+          <Title heading={6}>{t("backup_strategy")}</Title>
+          <Empty description={t("under_construction")} />
         </Space>
       </Card>
 
-      <Card title="开发调试" bordered={false}>
+      <Card
+        title={
+          <>
+            <span>{t("development_debugging")}</span>
+            <Button
+              type="text"
+              style={{
+                height: 24,
+              }}
+              icon={
+                <IconQuestionCircleFill
+                  style={{
+                    margin: 0,
+                  }}
+                />
+              }
+              href="https://www.bilibili.com/video/BV16q4y157CP"
+              target="_blank"
+              iconOnly
+            />
+          </>
+        }
+        bordered={false}
+      >
         <Space direction="vertical">
-          <Title heading={6}>VSCode地址</Title>
-          <Input />
+          <Title heading={6}>{t("vscode_url")}</Title>
+          <Input
+            ref={vscodeRef}
+            defaultValue={systemConfig.vscodeUrl}
+            onChange={(value) => {
+              systemConfig.vscodeUrl = value;
+            }}
+          />
+          <Checkbox
+            onChange={(checked) => {
+              systemConfig.vscodeReconnect = checked;
+            }}
+            defaultChecked={systemConfig.vscodeReconnect}
+          >
+            {t("auto_connect_vscode_service")}
+          </Checkbox>
+          <Button
+            type="primary"
+            onClick={() => {
+              const ctrl = IoC.instance(SystemController) as SystemController;
+              ctrl
+                .connectVSCode()
+                .then(() => {
+                  Message.success(t("connection_success")!);
+                })
+                .catch((e) => {
+                  Message.error(`${t("connection_failed")}: ${e}`);
+                });
+            }}
+          >
+            {t("connect")}
+          </Button>
         </Space>
       </Card>
     </Space>

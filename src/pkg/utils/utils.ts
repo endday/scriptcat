@@ -6,12 +6,8 @@ import Logger from "@App/app/logger/logger";
 import MessageInternal from "@App/app/message/internal";
 import { CronTime } from "cron";
 import dayjs from "dayjs";
-import "dayjs/locale/zh-cn";
-import relativeTime from "dayjs/plugin/relativeTime";
 import semver from "semver";
-
-dayjs.locale("zh-cn");
-dayjs.extend(relativeTime);
+import { enc, MD5 } from "crypto-js";
 
 export function nextTime(crontab: string): string {
   let oncePos = 0;
@@ -123,6 +119,47 @@ export function valueType(val: any) {
   }
 }
 
+export function toStorageValueStr(val: any): string {
+  switch (typeof val) {
+    case "string":
+      return `s${val}`;
+    case "number":
+      return `n${val.toString()}`;
+    case "boolean":
+      return `b${val ? "true" : "false"}`;
+    default:
+      try {
+        return `o${JSON.stringify(val)}`;
+      } catch (e) {
+        return "";
+      }
+  }
+}
+
+export function parseStorageValue(str: string): any {
+  if (str === "") {
+    return undefined;
+  }
+  const t = str[0];
+  const s = str.substring(1);
+  switch (t) {
+    case "b":
+      return s === "true";
+    case "n":
+      return parseFloat(s);
+    case "o":
+      try {
+        return JSON.parse(s);
+      } catch (e) {
+        return str;
+      }
+    case "s":
+      return s;
+    default:
+      return str;
+  }
+}
+
 // 尝试重新链接和超时通知
 export function tryConnect(
   message: MessageInternal,
@@ -217,4 +254,50 @@ export function checkSilenceUpdate(
     }
   }
   return true;
+}
+
+export function calculateMd5(blob: Blob) {
+  const reader = new FileReader();
+  reader.readAsBinaryString(blob);
+  return new Promise<string>((resolve) => {
+    reader.onloadend = () => {
+      // @ts-ignore
+      const hash = MD5(enc.Latin1.parse(reader.result)).toString();
+      resolve(hash);
+    };
+  });
+}
+
+// 在当前页后打开一个新页面
+export function openInCurrentTab(url: string) {
+  chrome.tabs.query(
+    {
+      active: true,
+    },
+    (tabs) => {
+      if (tabs.length) {
+        chrome.tabs.create({
+          url,
+          index: tabs[0].index + 1,
+        });
+      } else {
+        chrome.tabs.create({
+          url,
+        });
+      }
+    }
+  );
+}
+
+export function errorMsg(e: any): string {
+  if (typeof e === "string") {
+    return e;
+  }
+  if (e instanceof Error) {
+    return e.message;
+  }
+  if (typeof e === "object") {
+    return JSON.stringify(e);
+  }
+  return "";
 }

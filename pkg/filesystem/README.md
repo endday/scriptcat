@@ -4,3 +4,5 @@
 
 - zip
 - webdav
+- 百度网盘
+- onedrive

@@ -5,6 +5,7 @@ import registerEditor from "@App/pkg/utils/monaco-editor";
 import "uno.css";
 import "./index.css";
 import "@arco-design/web-react/dist/css/arco.css";
+import "@App/locales/locales";
 import MessageInternal from "@App/app/message/internal";
 import migrate from "@App/app/migrate";
 import MessageSandbox from "@App/app/message/sandbox";
@@ -18,10 +19,12 @@ import { IPermissionVerify } from "@App/runtime/background/permission_verify";
 import { SystemConfig } from "@App/pkg/config/config";
 import { tryConnect } from "@App/pkg/utils/utils";
 import { Message } from "@arco-design/web-react";
+import Runtime from "@App/runtime/background/runtime";
 import MainLayout from "../components/layout/MainLayout";
 import Sider from "../components/layout/Sider";
 
 migrate();
+
 // 初始化日志组件
 const loggerCore = new LoggerCore({
   debug: process.env.NODE_ENV === "development",
@@ -44,12 +47,15 @@ IoC.instance(SystemConfig);
 // eslint-disable-next-line no-undef
 const messageSandbox = new MessageSandbox(sandbox);
 IoC.registerInstance(MessageSandbox, messageSandbox);
+// 给runtime设置沙盒
+(IoC.instance(Runtime) as Runtime).setMessageSandbox(messageSandbox);
 // 开启GMApi,用于调试
 class DebugPermissionVerify implements IPermissionVerify {
   verify(): Promise<boolean> {
     return Promise.resolve(true);
   }
 }
+
 const gmapi = new GMApi(messageSandbox, new DebugPermissionVerify());
 gmapi.start();
 IoC.registerInstance(GMApi, gmapi);
@@ -60,6 +66,16 @@ tryConnect(message, (ok: boolean) => {
   } else {
     Message.error("后台通信连接失败,请注意保存当前页面数据,尝试重新连接中...");
   }
+});
+
+// 处理沙盒加载消息
+messageSandbox.setHandler("sandboxOnload", () => {
+  return Promise.resolve(true);
+});
+
+// 转发value变更消息给沙盒
+message.setHandler("valueUpdate", (action, value) => {
+  messageSandbox.send("valueUpdate", value);
 });
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

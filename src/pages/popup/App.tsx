@@ -11,6 +11,7 @@ import {
   Collapse,
   Dropdown,
   Menu,
+  Switch,
 } from "@arco-design/web-react";
 import {
   IconBook,
@@ -25,6 +26,7 @@ import {
 import React, { useEffect, useState } from "react";
 import { RiMessage2Line } from "react-icons/ri";
 import semver from "semver";
+import { useTranslation } from "react-i18next";
 import ScriptMenuList from "../components/ScriptMenuList";
 
 const CollapseItem = Collapse.Item;
@@ -43,20 +45,35 @@ function App() {
   const [notice, setNotice] = useState("");
   const [isRead, setIsRead] = useState(true);
   const [version, setVersion] = useState(ExtVersion);
+  const [currentUrl, setCurrentUrl] = useState("");
+  const [isEnableScript, setIsEnableScript] = useState(
+    localStorage.enable_script !== "false"
+  );
+  const { t } = useTranslation();
+
+  let url: URL | undefined;
+  try {
+    url = new URL(currentUrl);
+  } catch (e) {
+    // ignore error
+  }
 
   const message = IoC.instance(MessageInternal) as MessageInternal;
   useEffect(() => {
     systemManage.getNotice().then((res) => {
-      setNotice(res.notice);
-      setIsRead(res.isRead);
+      if (res) {
+        setNotice(res.notice);
+        setIsRead(res.isRead);
+      }
     });
     systemManage.getVersion().then((res) => {
-      setVersion(res);
+      res && setVersion(res);
     });
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs.length) {
         return;
       }
+      setCurrentUrl(tabs[0].url || "");
       message
         .syncSend("queryPageScript", { url: tabs[0].url, tabId: tabs[0].id })
         .then(
@@ -68,6 +85,9 @@ function App() {
             const list = resp.scriptList;
             list.sort((a, b) => {
               if (a.enable === b.enable) {
+                if (a.runNum !== b.runNum) {
+                  return b.runNum - a.runNum;
+                }
                 return b.updatetime - a.updatetime;
               }
               return a.enable ? -1 : 1;
@@ -84,13 +104,27 @@ function App() {
       title={
         <div className="flex justify-between">
           <span className="text-xl">ScriptCat</span>
-          <div className="flex flex-row">
+          <div className="flex flex-row items-center">
+            <Switch
+              size="small"
+              checked={isEnableScript}
+              onChange={(val) => {
+                setIsEnableScript(val);
+                if (val) {
+                  localStorage.enable_script = "true";
+                } else {
+                  localStorage.enable_script = "false";
+                }
+              }}
+            />
             <Button
               type="text"
               icon={<IconHome />}
               iconOnly
-              href="/src/options.html"
-              target="_blank"
+              onClick={() => {
+                // 用a链接的方式,vivaldi竟然会直接崩溃
+                window.open("/src/options.html", "_blank");
+              }}
             />
             <Badge count={isRead ? 0 : 1} dot offset={[-8, 6]}>
               <Button
@@ -110,21 +144,18 @@ function App() {
                   style={{
                     maxHeight: "none",
                   }}
-                  onClickMenuItem={(key) => {
+                  onClickMenuItem={async (key) => {
                     switch (key) {
                       case "newScript":
-                        chrome.tabs.query({ active: true }, (tab) => {
-                          if (tab.length) {
-                            chrome.storage.local.set({
-                              activeTabUrl: {
-                                url: tab[0].url,
-                              },
-                            });
-                            window.open(
-                              "/src/options.html#/script/editor?target=initial"
-                            );
-                          }
+                        await chrome.storage.local.set({
+                          activeTabUrl: {
+                            url: currentUrl,
+                          },
                         });
+                        window.open(
+                          "/src/options.html#/script/editor?target=initial",
+                          "_blank"
+                        );
                         break;
                       default:
                         window.open(key, "_blank");
@@ -134,23 +165,27 @@ function App() {
                 >
                   <Menu.Item key="newScript">
                     <IconPlus style={iconStyle} />
-                    新建脚本
+                    {t("create_script")}
                   </Menu.Item>
-                  <Menu.Item key="https://scriptcat.org/">
+                  <Menu.Item
+                    key={`https://scriptcat.org/search?domain=${
+                      url && url.host
+                    }`}
+                  >
                     <IconSearch style={iconStyle} />
-                    获取脚本
+                    {t("get_script")}
                   </Menu.Item>
                   <Menu.Item key="https://github.com/scriptscat/scriptcat/issues">
                     <IconBug style={iconStyle} />
-                    BUG/问题反馈
+                    {t("report_issue")}
                   </Menu.Item>
                   <Menu.Item key="https://docs.scriptcat.org/">
                     <IconBook style={iconStyle} />
-                    项目文档
+                    {t("project_docs")}
                   </Menu.Item>
                   <Menu.Item key="https://bbs.tampermonkey.net.cn/">
                     <RiMessage2Line style={iconStyle} />
-                    交流社区
+                    {t("community")}
                   </Menu.Item>
                   <Menu.Item key="https://github.com/scriptscat/scriptcat">
                     <IconGithub style={iconStyle} />
@@ -179,25 +214,33 @@ function App() {
         style={{ maxWidth: 640 }}
       >
         <CollapseItem
-          header="当前页运行脚本"
+          header={t("current_page_scripts")}
           name="script"
           style={{ padding: "0" }}
           contentStyle={{ padding: "0" }}
         >
-          <ScriptMenuList script={scriptList} isBackscript={false} />
+          <ScriptMenuList
+            script={scriptList}
+            isBackscript={false}
+            currentUrl={currentUrl}
+          />
         </CollapseItem>
 
         <CollapseItem
-          header="开启和运行的后台脚本"
+          header={t("enabled_background_scripts")}
           name="background"
           style={{ padding: "0" }}
           contentStyle={{ padding: "0" }}
         >
-          <ScriptMenuList script={backScriptList} isBackscript />
+          <ScriptMenuList
+            script={backScriptList}
+            isBackscript
+            currentUrl={currentUrl}
+          />
         </CollapseItem>
       </Collapse>
       <div className="flex flex-row arco-card-header !h-6">
-        <span className="text-[12px] font-500">v{ExtVersion}</span>
+        <span className="text-[12px] font-500">{`v${ExtVersion}`}</span>
         {semver.lt(ExtVersion, version) && (
           // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
           <span
@@ -209,7 +252,7 @@ function App() {
             className="text-1 font-500"
             style={{ cursor: "pointer" }}
           >
-            有更新的版本
+            {t("popup.new_version_available")}
           </span>
         )}
       </div>

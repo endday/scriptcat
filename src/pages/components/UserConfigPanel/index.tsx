@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next"; // 添加这行导入语句
 import { Script, UserConfig } from "@App/app/repo/scripts";
 import {
   Checkbox,
@@ -12,9 +13,10 @@ import {
   Tabs,
 } from "@arco-design/web-react";
 import TabPane from "@arco-design/web-react/es/Tabs/tab-pane";
-import FormItem from "@arco-design/web-react/es/Form/form-item";
 import IoC from "@App/app/ioc";
 import ValueController from "@App/app/service/value/controller";
+
+const FormItem = Form.Item;
 
 const UserConfigPanel: React.FC<{
   script: Script;
@@ -25,14 +27,18 @@ const UserConfigPanel: React.FC<{
   const [visible, setVisible] = React.useState(true);
   const [tab, setTab] = React.useState(Object.keys(userConfig)[0]);
   useEffect(() => {
+    setTab(Object.keys(userConfig)[0]);
     setVisible(true);
   }, [script, userConfig]);
+
+  const { t } = useTranslation();
+
   return (
     <Modal
       visible={visible}
-      title={`${script.name} 配置`}
-      okText="保存"
-      cancelText="关闭"
+      title={`${script.name} ${t("config")}`} // 替换为键值对应的英文文本
+      okText={t("save")} // 替换为键值对应的英文文本
+      cancelText={t("close")} // 替换为键值对应的英文文本
       onOk={() => {
         if (formRefs.current[tab]) {
           const saveValues = formRefs.current[tab].getFieldsValue();
@@ -50,7 +56,7 @@ const UserConfigPanel: React.FC<{
               );
             });
           });
-          Message.success("保存成功");
+          Message.success(t("save_success")!); // 替换为键值对应的英文文本
           setVisible(false);
         }
       }}
@@ -132,14 +138,21 @@ const UserConfigPanel: React.FC<{
                             />
                           );
                         case "checkbox":
-                          return <Checkbox>{item.description}</Checkbox>;
+                          return (
+                            <Checkbox
+                              defaultChecked={values[`${itemKey}.${key}`]}
+                            >
+                              {item.description}
+                            </Checkbox>
+                          );
                         case "select":
                         case "mult-select":
                           // eslint-disable-next-line no-case-declarations
                           let options: any[];
                           if (item.bind) {
-                            if (values[item.bind]) {
-                              options = values[item.bind]!;
+                            const bindKey = item.bind.substring(1);
+                            if (values[bindKey]) {
+                              options = values[bindKey]!;
                             } else {
                               options = [];
                             }
@@ -161,6 +174,15 @@ const UserConfigPanel: React.FC<{
                                 </Select.Option>
                               ))}
                             </Select>
+                          );
+                        case "textarea":
+                          return (
+                            <Input.TextArea
+                              placeholder={item.description}
+                              maxLength={item.max}
+                              rows={item.rows}
+                              showWordLimit
+                            />
                           );
                         default:
                           return null;

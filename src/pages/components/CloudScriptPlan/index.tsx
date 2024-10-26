@@ -4,13 +4,11 @@ import {
   Button,
   Checkbox,
   Form,
-  FormInstance,
   Input,
   Message,
   Modal,
   Select,
 } from "@arco-design/web-react";
-import FormItem from "@arco-design/web-react/es/Form/form-item";
 import { IconQuestionCircleFill } from "@arco-design/web-react/icon";
 import {
   ExportParams,
@@ -19,16 +17,12 @@ import {
 } from "@Pkg/cloudscript/cloudscript";
 import CloudScriptFactory from "@Pkg/cloudscript/factory";
 import JSZip from "jszip";
-import React, { useEffect, useRef } from "react";
+import React, { useEffect } from "react";
+import { useTranslation } from "react-i18next";
+
+const FormItem = Form.Item;
 
 const cloudScriptParams = CloudScriptFactory.params();
-
-const CloudScriptList = [
-  {
-    key: "local",
-    name: "本地",
-  },
-];
 
 function defaultParams(script: Script) {
   return {
@@ -43,11 +37,19 @@ const CloudScriptPlan: React.FC<{
   script?: Script;
   onClose: () => void;
 }> = ({ script, onClose }) => {
-  const formRef = useRef<FormInstance>(null);
+  const [form] = Form.useForm();
   const [visible, setVisible] = React.useState(false);
   const [cloudScriptType, setCloudScriptType] =
     React.useState<ExportTarget>("local");
   const [, setModel] = React.useState<Export>();
+  const { t } = useTranslation();
+
+  const CloudScriptList = [
+    {
+      key: "local",
+      name: t("local"),
+    },
+  ];
 
   useEffect(() => {
     if (script) {
@@ -59,10 +61,10 @@ const CloudScriptPlan: React.FC<{
         setModel(data);
         if (data && data.params[data.target]) {
           setCloudScriptType(data.target);
-          formRef.current?.setFieldsValue(data.params[data.target]);
+          form.setFieldsValue(data.params[data.target]);
         } else {
           setCloudScriptType("local");
-          formRef.current?.setFieldsValue(defaultParams(script));
+          form.setFieldsValue(defaultParams(script));
         }
       });
     }
@@ -77,7 +79,7 @@ const CloudScriptPlan: React.FC<{
               lineHeight: "32px",
             }}
           >
-            {script?.name} 上传至云
+            {script?.name} {t("upload_to_cloud")}
           </span>
           <Button
             type="text"
@@ -94,7 +96,7 @@ const CloudScriptPlan: React.FC<{
           />
         </div>
       }
-      okText="导出"
+      okText={t("export")}
       visible={visible}
       onCancel={() => {
         setVisible(false);
@@ -103,8 +105,7 @@ const CloudScriptPlan: React.FC<{
       onConfirm={async () => {
         // 保存并导出
         const dao = new ExportDAO();
-        const params =
-          formRef.current?.getFieldsValue() as unknown as ExportParams;
+        const params = form.getFieldsValue() as unknown as ExportParams;
         if (!params || !script) {
           return;
         }
@@ -120,11 +121,11 @@ const CloudScriptPlan: React.FC<{
           prevModel.params[cloudScriptType] = params;
           prevModel.target = cloudScriptType;
           dao.save(prevModel).catch((err) => {
-            Message.error(`保存失败: ${err}`);
+            Message.error(`${t("save_failed")}: ${err}`);
           });
           return prevModel;
         });
-        Message.info("导出中...");
+        Message.info(t("exporting")!);
         // 本地特殊处理
         const values = await parseExportValue(script, params.exportValue);
         const cookies = await parseExportCookie(params.exportCookie);
@@ -162,9 +163,9 @@ const CloudScriptPlan: React.FC<{
           width: "100%",
         }}
         layout="vertical"
-        ref={formRef}
+        form={form}
       >
-        <FormItem label="上传至">
+        <FormItem label={t("upload_to")}>
           <Select
             value={cloudScriptType}
             onChange={(value) => {
@@ -186,27 +187,27 @@ const CloudScriptPlan: React.FC<{
             </FormItem>
           );
         })}
-        <FormItem label="值导出表达式" field="exportValue">
+        <FormItem label={t("value_export_expression")} field="exportValue">
           <Input.TextArea />
         </FormItem>
         <FormItem label="" field="overwriteValue">
-          <Checkbox>导入时覆盖原值</Checkbox>
+          <Checkbox>{t("overwrite_original_value_on_import")}</Checkbox>
         </FormItem>
-        <FormItem label="cookie导出表达式" field="exportCookie">
+        <FormItem label={t("cookie_export_expression")} field="exportCookie">
           <Input.TextArea />
         </FormItem>
         <FormItem label="" field="overwriteCookie">
-          <Checkbox>导入时覆盖原值</Checkbox>
+          <Checkbox>{t("overwrite_original_cookie_on_import")}</Checkbox>
         </FormItem>
         <Button
           type="primary"
           onClick={() => {
             if (script) {
-              formRef.current?.setFieldsValue(defaultParams(script));
+              form.setFieldsValue(defaultParams(script));
             }
           }}
         >
-          恢复默认值
+          {t("restore_default_values")}
         </Button>
       </Form>
     </Modal>

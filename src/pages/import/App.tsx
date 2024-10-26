@@ -10,6 +10,7 @@ import {
   Switch,
   Typography,
 } from "@arco-design/web-react";
+import { useTranslation } from "react-i18next"; // 导入react-i18next的useTranslation钩子
 import SynchronizeController from "@App/app/service/synchronize/controller";
 import IoC from "@App/app/ioc";
 import JSZip from "jszip";
@@ -26,10 +27,12 @@ import {
 } from "@App/app/repo/scripts";
 import { Subscribe } from "@App/app/repo/subscribe";
 import ScriptController from "@App/app/service/script/controller";
+import ValueController from "@App/app/service/value/controller";
 
 type ScriptData = ScriptBackupData & {
-  script?: Script & { oldScript?: Script };
+  script?: { script: Script; oldScript?: Script };
   install: boolean;
+  error?: string;
 };
 
 type SubscribeData = SubscribeBackupData & {
@@ -44,9 +47,12 @@ function App() {
   const [installNum, setInstallNum] = useState([0, 0]);
   const [loading, setLoading] = useState(true);
   const scriptCtrl = IoC.instance(ScriptController) as ScriptController;
+  const valueCtrl = IoC.instance(ValueController) as ValueController;
   const syncCtrl = IoC.instance(SynchronizeController) as SynchronizeController;
   const url = new URL(window.location.href);
   const uuid = url.searchParams.get("uuid") || "";
+  const { t } = useTranslation(); // 使用useTranslation钩子获取翻译函数
+
   useEffect(() => {
     syncCtrl
       .fetchImportInfo(uuid)
@@ -59,36 +65,46 @@ function App() {
         // 获取各个脚本现在已经存在的信息
         const result = await Promise.all(
           backDataScript.map(async (item) => {
-            item.script = await prepareScriptByCode(
-              item.code,
-              item.options?.meta.file_url || "",
-              item.options?.meta.file_url
-                ? undefined
-                : item.options?.meta.uuid || undefined
-            );
+            try {
+              const prepareScript = await prepareScriptByCode(
+                item.code,
+                item.options?.meta.file_url || "",
+                item.options?.meta.sc_uuid || undefined,
+                true
+              );
+              item.script = prepareScript;
+            } catch (e: any) {
+              item.error = e.toString();
+              return Promise.resolve(item);
+            }
             if (!item.options) {
               item.options = {
                 options: {} as ScriptOptions,
                 meta: {
-                  name: item.script.name,
-                  uuid: item.script.uuid,
-                  file_url: item.script.downloadUrl || "",
-                  modified: item.script.createtime,
-                  subscribe_url: item.script.subscribeUrl,
+                  name: item.script?.script.name,
+                  // 此uuid是对tm的兼容处理
+                  uuid: item.script?.script.uuid,
+                  sc_uuid: item.script?.script.uuid,
+                  file_url: item.script?.script.downloadUrl || "",
+                  modified: item.script?.script.createtime,
+                  subscribe_url: item.script?.script.subscribeUrl,
                 },
                 settings: {
-                  enabled: !(
-                    item.script.metadata.background ||
-                    item.script.metadata.crontab
-                  ),
+                  enabled:
+                    item.enabled === false
+                      ? false
+                      : !(
+                          item.script?.script.metadata.background ||
+                          item.script?.script.metadata.crontab
+                        ),
                   position: 0,
                 },
               };
-            } else {
-              item.script.status = item.options.settings.enabled
+            }
+            item.script.script.status =
+              item.enabled !== false && item.options.settings.enabled
                 ? SCRIPT_STATUS_ENABLE
                 : SCRIPT_STATUS_DISABLE;
-            }
             item.install = true;
             return Promise.resolve(item);
           })
@@ -103,7 +119,7 @@ function App() {
   }, []);
   return (
     <div>
-      <Card bordered={false} title="数据导入">
+      <Card bordered={false} title={t("data_import")}>
         <Space direction="vertical" style={{ width: "100%" }}>
           <Space>
             <Button
@@ -112,21 +128,26 @@ function App() {
               onClick={async () => {
                 setLoading(true);
                 const result = scripts.map(async (item) => {
-                  let resp = true;
-                  if (item.install) {
-                    resp = await scriptCtrl.upsert(item.script!);
+                  const ok = true;
+                  if (item.install && !item.error) {
+                    const resp = await scriptCtrl.upsert(item.script?.script!);
+                    // 导入数据
+                    const { data } = item.storage;
+                    Object.keys(data).forEach((key) => {
+                      valueCtrl.setValue(resp.id, key, data[key]);
+                    });
                   }
                   setInstallNum((prev) => {
                     return [prev[0] + 1, prev[1]];
                   });
-                  return Promise.resolve(resp);
+                  return Promise.resolve(ok);
                 });
                 await Promise.all(result);
                 setLoading(false);
-                Message.success("导入成功");
+                Message.success(t("import_success")!);
               }}
             >
-              导入
+              {t("import")}
             </Button>
             <Button
               type="primary"
@@ -134,11 +155,11 @@ function App() {
               loading={loading}
               onClick={() => window.close()}
             >
-              关闭
+              {t("close")}
             </Button>
           </Space>
           <Typography.Text>
-            请选择你要导入的脚本:{" "}
+            {t("select_scripts_to_import")}:{" "}
             <Checkbox
               checked={selectAll[0]}
               onChange={() => {
@@ -151,13 +172,13 @@ function App() {
                 });
               }}
             >
-              全选
+              {t("select_all")}
             </Checkbox>
             <Divider type="vertical" />
-            脚本导入进度: {installNum[0]}/{scripts.length}
+            {t("script_import_progress")}: {installNum[0]}/{scripts.length}
           </Typography.Text>
           <Typography.Text>
-            请选择你要导入的订阅:{" "}
+            {t("select_subscribes_to_import")}:{" "}
             <Checkbox
               checked={selectAll[1]}
               onChange={() => {
@@ -170,10 +191,11 @@ function App() {
                 });
               }}
             >
-              全选
+              {t("select_all")}
             </Checkbox>
             <Divider type="vertical" />
-            订阅导入进度: {installNum[1]}/{subscribes.length}
+            {t("subscribe_import_progress")}: {installNum[1]}/
+            {subscribes.length}
           </Typography.Text>
           <List
             className="import-list"
@@ -186,7 +208,12 @@ function App() {
                 className="flex flex-row justify-between p-2"
                 key={`e_${index}`}
                 style={{
-                  background: item.install ? "rgb(var(--arcoblue-1))" : "",
+                  // eslint-disable-next-line no-nested-ternary
+                  background: item.error
+                    ? "rgb(var(--red-1))"
+                    : item.install
+                    ? "rgb(var(--arcoblue-1))"
+                    : "",
                   borderBottom: "1px solid rgb(var(--gray-3))",
                   cursor: "pointer",
                 }}
@@ -210,26 +237,31 @@ function App() {
                       color: "rgb(var(--blue-5))",
                     }}
                   >
-                    {item.script?.name || "-"}
+                    {item.script?.script?.name || item.error || t("unknown")}
                   </Typography.Title>
                   <span className="text-sm color-gray-5">
-                    作者:{" "}
-                    {item.script?.metadata.author &&
-                      item.script?.metadata.author[0]}
+                    {t("author")}:{" "}
+                    {item.script?.script?.metadata.author &&
+                      item.script?.script?.metadata.author[0]}
                   </span>
                   <span className="text-sm color-gray-5">
-                    描述:{" "}
-                    {item.script?.metadata.description &&
-                      item.script?.metadata.description[0]}
+                    {t("description")}:{" "}
+                    {item.script?.script?.metadata.description &&
+                      item.script?.script?.metadata.description[0]}
                   </span>
                   <span className="text-sm color-gray-5">
-                    来源: {item.options?.meta.file_url || "本地创建"}
+                    {t("source")}:{" "}
+                    {item.options?.meta.file_url || t("local_creation")}
                   </span>
                   <span className="text-sm color-gray-5">
-                    操作:{" "}
+                    {t("operation")}:{" "}
                     {(item.install &&
-                      (item.script?.oldScript ? "更新" : "新增")) ||
-                      "不做操作"}
+                      (item.script?.oldScript ? t("update") : t("add_new"))) ||
+                      (item.error
+                        ? `${t("error")}: ${item.options?.meta.name} - ${
+                            item.options?.meta.uuid
+                          }`
+                        : t("no_operation"))}
                   </span>
                 </Space>
                 <div
@@ -239,14 +271,18 @@ function App() {
                     textAlign: "center",
                   }}
                 >
-                  <span className="text-sm color-gray-5">开启脚本</span>
+                  <span className="text-sm color-gray-5">
+                    {t("enable_script")}
+                  </span>
                   <div className="text-center">
                     <Switch
                       size="small"
-                      checked={item.script?.status === SCRIPT_STATUS_ENABLE}
+                      checked={
+                        item.script?.script?.status === SCRIPT_STATUS_ENABLE
+                      }
                       onChange={(checked) => {
                         setScripts((prev) => {
-                          prev[index].script!.status = checked
+                          prev[index].script!.script.status = checked
                             ? SCRIPT_STATUS_ENABLE
                             : SCRIPT_STATUS_DISABLE;
                           return [...prev];

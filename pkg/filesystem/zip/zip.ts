@@ -21,7 +21,8 @@ export default class ZipFileSystem implements FileSystem {
     return Promise.resolve();
   }
 
-  open(path: string): Promise<FileReader> {
+  open(info: File): Promise<FileReader> {
+    const path = info.name;
     const file = this.zip.file(path);
     if (file) {
       return Promise.resolve(new ZipFileReader(file));
@@ -46,12 +47,9 @@ export default class ZipFileSystem implements FileSystem {
     return Promise.resolve();
   }
 
-  list(path?: string): Promise<File[]> {
+  list(): Promise<File[]> {
     const files: File[] = [];
     Object.keys(this.zip.files).forEach((key) => {
-      if (path && !key.startsWith(path)) {
-        return;
-      }
       files.push({
         name: key,
         path: key,
@@ -62,5 +60,9 @@ export default class ZipFileSystem implements FileSystem {
       });
     });
     return Promise.resolve(files);
+  }
+
+  getDirUrl(): Promise<string> {
+    throw new Error("Method not implemented.");
   }
 }

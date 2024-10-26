@@ -12,12 +12,13 @@ import {
 import { CronJob } from "cron";
 import IoC from "@App/app/ioc";
 import ExecScript from "./exec_script";
+import { BgExecScriptWarp, CATRetryError } from "./exec_warp";
 
 type SandboxEvent = "enable" | "disable" | "start" | "stop";
 
 type Handler = (data: any) => Promise<any>;
 
-// 沙盒运行环境
+// 沙盒运行环境, 后台脚本与定时脚本的运行环境
 @IoC.Singleton(MessageSandbox)
 export default class SandboxRuntime {
   message: MessageSandbox;
@@ -28,9 +29,53 @@ export default class SandboxRuntime {
 
   execScripts: Map<number, ExecScript> = new Map();
 
+  retryList: {
+    script: ScriptRunResouce;
+    retryTime: number;
+  }[] = [];
+
   constructor(message: MessageSandbox) {
     this.message = message;
     this.logger = LoggerCore.getInstance().logger({ component: "sandbox" });
+    // 重试队列,5s检查一次
+    setInterval(() => {
+      if (!this.retryList.length) {
+        return;
+      }
+      const now = Date.now();
+      const retryList = [];
+      for (let i = 0; i < this.retryList.length; i += 1) {
+        const item = this.retryList[i];
+        if (item.retryTime < now) {
+          this.retryList.splice(i, 1);
+          i -= 1;
+          retryList.push(item.script);
+        }
+      }
+      retryList.forEach((script) => {
+        script.nextruntime = 0;
+        this.execScript(script);
+      });
+    }, 5000);
+  }
+
+  joinRetryList(script: ScriptRunResouce) {
+    if (script.nextruntime) {
+      this.retryList.push({
+        script,
+        retryTime: script.nextruntime,
+      });
+      this.retryList.sort((a, b) => a.retryTime - b.retryTime);
+    }
+  }
+
+  removeRetryList(scriptId: number) {
+    for (let i = 0; i < this.retryList.length; i += 1) {
+      if (this.retryList[i].script.id === scriptId) {
+        this.retryList.splice(i, 1);
+        i -= 1;
+      }
+    }
   }
 
   listenEvent(event: SandboxEvent, handler: Handler) {
@@ -55,12 +100,16 @@ export default class SandboxRuntime {
 
   // 直接运行脚本
   start(script: ScriptRunResouce): Promise<boolean> {
-    return this.execScript(script);
+    return this.execScript(script, true);
   }
 
   stop(scriptId: number): Promise<boolean> {
     const exec = this.execScripts.get(scriptId);
     if (!exec) {
+      this.message.send("scriptRunStatus", [
+        scriptId,
+        SCRIPT_RUN_STATUS_COMPLETE,
+      ]);
       return Promise.resolve(false);
     }
     this.execStop(exec);
@@ -76,6 +125,7 @@ export default class SandboxRuntime {
     switch (script.type) {
       case SCRIPT_TYPE_CRONTAB:
         // 定时脚本
+        this.stopCronJob(script.id);
         return this.crontabScript(script);
       case SCRIPT_TYPE_BACKGROUND:
         // 后台脚本, 直接执行脚本
@@ -86,15 +136,18 @@ export default class SandboxRuntime {
   }
 
   disable(id: number): Promise<boolean> {
-    const exec = this.execScripts.get(id);
-    if (!exec) {
-      return Promise.resolve(false);
-    }
     // 停止脚本运行,主要是停止定时器
     // 后续考虑停止正在运行的脚本的方法
     // 现期对于正在运行的脚本仅仅是在background中判断是否运行
     // 未运行的脚本不处理GMApi的请求
-    this.execStop(exec);
+    this.stopCronJob(id);
+    // 移除重试队列
+    this.removeRetryList(id);
+    return this.stop(id);
+  }
+
+  // 停止计时器
+  stopCronJob(id: number) {
     const list = this.cronJob.get(id);
     if (list) {
       list.forEach((val) => {
@@ -102,18 +155,17 @@ export default class SandboxRuntime {
       });
       this.cronJob.delete(id);
     }
-    return Promise.resolve(true);
   }
 
   // 执行脚本
-  execScript(script: ScriptRunResouce) {
+  execScript(script: ScriptRunResouce, execOnce?: boolean) {
     const logger = this.logger.with({ scriptId: script.id, name: script.name });
     if (this.execScripts.has(script.id)) {
       // 释放掉资源
       // 暂未实现执行完成后立马释放,会在下一次执行时释放
       this.stop(script.id);
     }
-    const exec = new ExecScript(script, this.message);
+    const exec = new BgExecScriptWarp(script, this.message);
     this.execScripts.set(script.id, exec);
     this.message.send("scriptRunStatus", [
       exec.scriptRes.id,
@@ -136,11 +188,25 @@ export default class SandboxRuntime {
         })
         .catch((err) => {
           // 发送执行完成+错误消息
-          logger.error("exec script error", Logger.E(err));
+          let errMsg;
+          let nextruntime = 0;
+          if (err instanceof CATRetryError) {
+            errMsg = { error: err.msg };
+            if (!execOnce) {
+              // 下一次执行时间
+              nextruntime = err.time.getTime();
+              script.nextruntime = nextruntime;
+              this.joinRetryList(script);
+            }
+          } else {
+            errMsg = Logger.E(err);
+          }
+          logger.error("exec script error", errMsg);
           this.message.send("scriptRunStatus", [
             exec.scriptRes.id,
             SCRIPT_RUN_STATUS_ERROR,
-            Logger.E(err),
+            errMsg,
+            nextruntime,
           ]);
           // 错误还是抛出,方便排查
           throw err;
@@ -156,6 +222,8 @@ export default class SandboxRuntime {
     if (!script.metadata.crontab) {
       throw new Error("错误的crontab表达式");
     }
+    // 如果有nextruntime,则加入重试队列
+    this.joinRetryList(script);
     let flag = false;
     const cronJobList: Array<CronJob> = [];
     script.metadata.crontab.forEach((val) => {

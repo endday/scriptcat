@@ -8,7 +8,7 @@ const package = require("../package.json");
 
 // 判断是否为beta版本
 const version = semver.parse(package.version);
-if (version.prerelease) {
+if (version.prerelease.length) {
   // 替换manifest中的版本
   let betaVersion = 1000;
   switch (version.prerelease[0]) {
@@ -25,6 +25,8 @@ if (version.prerelease) {
   }
   manifest.version = `${version.major.toString()}.${version.minor.toString()}.${version.patch.toString()}.${betaVersion.toString()}`;
   manifest.name = `${manifest.name} Beta`;
+} else {
+  manifest.version = package.version;
 }
 
 // 处理manifest version
@@ -36,19 +38,21 @@ fs.writeFileSync("./src/manifest.json", str);
 let configSystem = fs.readFileSync("./src/app/const.ts").toString();
 // 如果是由github action的分支触发的构建,在版本中再加上commit id
 if (process.env.GITHUB_REF_TYPE === "branch") {
-  package.version += `+${process.env.GITHUB_SHA.substring(0, 7)}`;
+  configSystem = configSystem.replace(
+    "ExtVersion = version;",
+    `ExtVersion = \`\${version}+${process.env.GITHUB_SHA.substring(0, 7)}\`;`
+  );
+  fs.writeFileSync("./src/app/const.ts", configSystem);
 }
-configSystem = configSystem.replace(
-  /ExtVersion = "(.*?)";/,
-  `ExtVersion = "${package.version}";`
-);
-fs.writeFileSync("./src/app/const.ts", configSystem);
 
 execSync("npm run build", { stdio: "inherit" });
 
-if (version.prerelease) {
-  // 替换蓝猫logo
+if (version.prerelease.length || process.env.GITHUB_REF_TYPE === "branch") {
+  // beta时红猫logo
   fs.copyFileSync("./build/assets/logo-beta.png", "./dist/ext/assets/logo.png");
+} else {
+  // 非beta时蓝猫logo
+  fs.copyFileSync("./build/assets/logo.png", "./dist/ext/assets/logo.png");
 }
 
 // 处理firefox和chrome的zip压缩包
@@ -59,8 +63,8 @@ const chromeManifest = { ...manifest };
 delete chromeManifest.content_security_policy;
 
 delete firefoxManifest.sandbox;
-firefoxManifest.content_security_policy =
-  "script-src 'self' 'unsafe-eval'; object-src 'self'";
+// firefoxManifest.content_security_policy =
+// "script-src 'self' blob:; object-src 'self' blob:";
 firefoxManifest.browser_specific_settings = {
   gecko: { strict_min_version: "91.1.0" },
 };
@@ -89,7 +93,12 @@ chrome.file("manifest.json", JSON.stringify(chromeManifest));
 firefox.file("manifest.json", JSON.stringify(firefoxManifest));
 
 addDir(chrome, "./dist/ext", "", ["manifest.json"]);
-addDir(firefox, "./dist/ext", "", ["manifest.json"]);
+addDir(firefox, "./dist/ext", "", ["manifest.json", "ts.worker.js"]);
+// 添加ts.worker.js名字为gz
+firefox.file(
+  "src/ts.worker.js.gz",
+  fs.readFileSync("./dist/ext/src/ts.worker.js")
+);
 
 // 导出zip包
 chrome

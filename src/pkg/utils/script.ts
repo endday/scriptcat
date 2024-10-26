@@ -1,4 +1,4 @@
-import { v4 as uuidv4, v5 as uuidv5 } from "uuid";
+import { v4 as uuidv4 } from "uuid";
 import {
   Metadata,
   Script,
@@ -28,7 +28,16 @@ export function getMetadataStr(code: string): string | null {
   if (start === -1 || end === -1) {
     return null;
   }
-  return `// ${code.substring(start, end + 14)}`;
+  return `// ${code.substring(start, end + 15)}`;
+}
+
+export function getUserConfigStr(code: string): string | null {
+  const start = code.indexOf("==UserConfig==");
+  const end = code.indexOf("==/UserConfig==");
+  if (start === -1 || end === -1) {
+    return null;
+  }
+  return `/* ${code.substring(start, end + 15)} */`;
 }
 
 export function parseMetadata(code: string): Metadata | null {
@@ -58,6 +67,12 @@ export function parseMetadata(code: string): Metadata | null {
   }
   if (ret.name === undefined) {
     return null;
+  }
+  if (Object.keys(ret).length < 3) {
+    return null;
+  }
+  if (!ret.namespace) {
+    ret.namespace = [""];
   }
   if (issub) {
     ret.usersubscribe = [];
@@ -95,7 +110,8 @@ export type ScriptInfo = {
 export async function fetchScriptInfo(
   url: string,
   source: InstallSource,
-  isUpdate: boolean
+  isUpdate: boolean,
+  uuid: string
 ): Promise<ScriptInfo> {
   const resp = await fetch(url, {
     headers: {
@@ -105,12 +121,15 @@ export async function fetchScriptInfo(
   if (resp.status !== 200) {
     throw new Error("fetch script info failed");
   }
+  if (resp.headers.get("content-type")?.indexOf("text/html") !== -1) {
+    throw new Error("url is html");
+  }
+
   const body = await resp.text();
   const ok = parseMetadata(body);
   if (!ok) {
     throw new Error("parse script info failed");
   }
-  const uuid = uuidv5(url, uuidv5.URL);
   const ret: ScriptInfo = {
     url,
     code: body,
@@ -146,15 +165,16 @@ export function copyScript(script: Script, old: Script): Script {
 export function copySubscribe(sub: Subscribe, old: Subscribe): Subscribe {
   const ret = sub;
   ret.id = old.id;
+  ret.scripts = old.scripts;
   ret.createtime = old.createtime;
   ret.status = old.status;
   return ret;
 }
 
-export function blobToBase64(blob: Blob): Promise<string | null> {
+export function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onloadend = () => resolve(<string | null>reader.result);
+    reader.onloadend = () => resolve(<string>reader.result);
     reader.readAsDataURL(blob);
   });
 }
@@ -209,8 +229,9 @@ export function strToBase64(str: string): string {
 export function prepareScriptByCode(
   code: string,
   url: string,
-  uuid?: string
-): Promise<Script & { oldScript?: Script }> {
+  uuid?: string,
+  override?: boolean
+): Promise<{ script: Script; oldScript?: Script }> {
   const dao = new ScriptDAO();
   return new Promise((resolve, reject) => {
     const metadata = parseMetadata(code);
@@ -219,6 +240,12 @@ export function prepareScriptByCode(
     }
     if (metadata.name === undefined) {
       throw new Error("脚本名不能为空");
+    }
+    if (metadata.version === undefined) {
+      throw new Error("脚本@version版本不能为空");
+    }
+    if (metadata.namespace === undefined) {
+      throw new Error("脚本@namespace命名空间不能为空");
     }
     let type = SCRIPT_TYPE_NORMAL;
     if (metadata.crontab !== undefined) {
@@ -247,9 +274,15 @@ export function prepareScriptByCode(
         [, domain] = urlSplit;
       }
     }
-    let script: Script & { oldScript?: Script } = {
+    let newUUID = "";
+    if (uuid) {
+      newUUID = uuid;
+    } else {
+      newUUID = uuidv4();
+    }
+    let script: Script = {
       id: 0,
-      uuid: uuid || uuidv4(),
+      uuid: newUUID,
       name: metadata.name[0],
       code,
       author: metadata.author && metadata.author[0],
@@ -271,13 +304,13 @@ export function prepareScriptByCode(
     };
     const handler = async () => {
       let old: Script | undefined;
-      if (uuid !== undefined) {
+      if (uuid) {
         old = await dao.findByUUID(uuid);
+        if (!old && override) {
+          old = await dao.findByNameAndNamespace(script.name, script.namespace);
+        }
       } else {
         old = await dao.findByNameAndNamespace(script.name, script.namespace);
-        if (!old) {
-          old = await dao.findByUUID(script.uuid);
-        }
       }
       if (old) {
         if (
@@ -289,7 +322,6 @@ export function prepareScriptByCode(
           reject(new Error("脚本类型不匹配,普通脚本与后台脚本不能互相转变"));
           return;
         }
-        script.oldScript = old;
         script = copyScript(script, old);
       } else {
         // 前台脚本默认开启
@@ -298,8 +330,7 @@ export function prepareScriptByCode(
         }
         script.checktime = new Date().getTime();
       }
-
-      resolve(script);
+      resolve({ script, oldScript: old });
     };
     handler();
   });
@@ -308,7 +339,7 @@ export function prepareScriptByCode(
 export async function prepareSubscribeByCode(
   code: string,
   url: string
-): Promise<Subscribe & { oldSubscribe?: Subscribe }> {
+): Promise<{ subscribe: Subscribe; oldSubscribe?: Subscribe }> {
   const dao = new SubscribeDAO();
   const metadata = parseMetadata(code);
   if (metadata == null) {
@@ -317,7 +348,7 @@ export async function prepareSubscribeByCode(
   if (metadata.name === undefined) {
     throw new Error("订阅名不能为空");
   }
-  let subscribe: Subscribe & { oldSubscribe?: Subscribe } = {
+  let subscribe: Subscribe = {
     id: 0,
     url,
     name: metadata.name[0],
@@ -332,8 +363,7 @@ export async function prepareSubscribeByCode(
   };
   const old = await dao.findByUrl(url);
   if (old) {
-    subscribe.oldSubscribe = old;
     subscribe = copySubscribe(subscribe, old);
   }
-  return Promise.resolve(subscribe);
+  return Promise.resolve({ subscribe, oldSubscribe: old });
 }

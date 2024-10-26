@@ -63,11 +63,21 @@ const scriptRes = {
     ],
     connect: ["example.com"],
   },
-  code: "console.log('test')",
+  code: `// ==UserScript==
+  // @name         New Userscript
+  // @namespace    https://bbs.tampermonkey.net.cn/
+  // @version      0.1.0
+  // @description  try to take over the world!
+  // @author       You
+  // @match        https://bbs.tampermonkey.net.cn/
+  // ==/UserScript==
+  
+  console.log('test');`,
   runFlag: "test",
   value: {},
   grantMap: {},
 } as unknown as ScriptRunResouce;
+scriptRes.sourceCode = scriptRes.code;
 
 const exec = new ExecScript(scriptRes, internal);
 const contentApi = exec.sandboxContent!;
@@ -234,7 +244,7 @@ describe("GM xmlHttpRequest", () => {
         onreadystatechange: async (resp) => {
           if (resp.readyState === 4 && resp.status === 200) {
             expect(resp.responseText).toBe("form");
-            expect(await resp.response.text()).toBe("form");
+            expect(await (<Blob>resp.response).text()).toBe("form");
             resolve();
           }
         },
@@ -249,6 +259,7 @@ describe("GM xmlHttpRequest", () => {
         method: "GET",
         responseType: "json",
         onload: (resp) => {
+          // @ts-ignore
           expect(resp.response.test).toBe(1);
           expect(resp.responseText).toBe('{"test":1}');
           resolve();
@@ -302,8 +313,9 @@ describe("GM xmlHttpRequest", () => {
       });
     });
   });
+
   it("unsafeHeader/cookie", async () => {
-    global.XMLHttpRequest = chromeMock.webRequest.mockXhr(mockXhr);
+    // global.XMLHttpRequest = chromeMock.webRequest.mockXhr(mockXhr);
     // 模拟header
     await new Promise<void>((resolve) => {
       contentApi.GM_xmlhttpRequest({
@@ -492,6 +504,18 @@ describe("GM cookie", () => {
         }
       );
     });
+    // 测试GM_cookie.list
+    await new Promise<void>((resolve) => {
+      // @ts-ignore
+      contentApi.GM_cookie.list(
+        { url: "https://scriptcat.org" },
+        // @ts-ignore
+        (value, err) => {
+          expect(err).toEqual("hostname must be in the definition of connect");
+          resolve();
+        }
+      );
+    });
     // 在@connect中,但被拒绝
     const hookFn = (createProperties: chrome.tabs.CreateProperties) => {
       // 模拟确认
@@ -627,11 +651,21 @@ describe("GM.*", () => {
         "GM.notification",
       ],
     },
-    code: "console.log('test')",
+    code: `// ==UserScript==
+    // @name         New Userscript
+    // @namespace    https://bbs.tampermonkey.net.cn/
+    // @version      0.1.0
+    // @description  try to take over the world!
+    // @author       You
+    // @match        https://bbs.tampermonkey.net.cn/
+    // ==/UserScript==
+    
+    console.log('test');`,
     runFlag: "test",
     value: {},
     grantMap: {},
   } as unknown as ScriptRunResouce;
+  scriptRes.sourceCode = scriptRes.code;
 
   const exec = new ExecScript(scriptRes, internal);
   const contentApi = exec.sandboxContent! as any;

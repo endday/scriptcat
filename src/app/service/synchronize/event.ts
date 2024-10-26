@@ -49,7 +49,7 @@ export default class SynchronizeEventListener {
       Cache.getInstance().del(key);
     }, 60 * 100000);
     chrome.tabs.create({
-      url: `src/import.html?uuid=${uuid}`,
+      url: `/src/import.html?uuid=${uuid}`,
     });
     return Promise.resolve({ uuid });
   }
@@ -59,10 +59,10 @@ export default class SynchronizeEventListener {
   }
 
   // 生成备份文件
-  public async backupHandler() {
+  public async backupHandler(ids?: number[]) {
     const zip = new JSZip();
     const fs = new ZipFileSystem(zip);
-    await this.manager.backup(fs);
+    await this.manager.backup(fs, ids);
     // 生成文件,并下载
     const files = await zip.generateAsync({
       type: "blob",

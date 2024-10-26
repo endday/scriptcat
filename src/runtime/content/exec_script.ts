@@ -34,10 +34,14 @@ export default class ExecScript {
 
   proxyMessage: ProxyMessageManager;
 
+  // eslint-disable-next-line camelcase
+  GM_info: any;
+
   constructor(
     scriptRes: ScriptRunResouce,
     message: MessageManager,
-    scriptFunc?: ScriptFunc
+    scriptFunc?: ScriptFunc,
+    thisContext?: { [key: string]: any }
   ) {
     this.scriptRes = scriptRes;
     this.logger = LoggerCore.getInstance().logger({
@@ -45,6 +49,7 @@ export default class ExecScript {
       id: this.scriptRes.id,
       name: this.scriptRes.name,
     });
+    this.GM_info = GMApi.GM_info(this.scriptRes);
     this.proxyMessage = new ProxyMessageManager(message);
     if (scriptFunc) {
       this.scriptFunc = scriptFunc;
@@ -54,11 +59,19 @@ export default class ExecScript {
     }
     if (scriptRes.grantMap.none) {
       // 不注入任何GM api
-      this.proxyContent = window;
+      this.proxyContent = global;
     } else {
       // 构建脚本GM上下文
-      this.sandboxContent = createContext(scriptRes, this.proxyMessage);
-      this.proxyContent = proxyContext(window, this.sandboxContent);
+      this.sandboxContent = createContext(
+        scriptRes,
+        this.GM_info,
+        this.proxyMessage
+      );
+      this.proxyContent = proxyContext(
+        global,
+        this.sandboxContent,
+        thisContext
+      );
     }
   }
 
@@ -71,7 +84,7 @@ export default class ExecScript {
     this.logger.debug("script start");
     return this.scriptFunc.apply(this.proxyContent, [
       this.proxyContent,
-      GMApi.GM_info(this.scriptRes),
+      this.GM_info,
     ]);
   }
 

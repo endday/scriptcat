@@ -23,7 +23,7 @@ export default class ScriptController {
   }
 
   // 安装或者更新脚本
-  public upsert(script: Script) {
+  public upsert(script: Script): Promise<{ id: number }> {
     return this.dispatchEvent("upsert", script);
   }
 
@@ -45,5 +45,25 @@ export default class ScriptController {
 
   checkUpdate(id: number) {
     return this.dispatchEvent("checkUpdate", id);
+  }
+
+  importByUrl(url: string) {
+    return this.dispatchEvent("importByUrl", url);
+  }
+
+  exclude(id: number, exclude: string, remove: boolean) {
+    return this.dispatchEvent("exclude", { id, exclude, remove });
+  }
+
+  resetExclude(id: number, exclude: string[] | undefined) {
+    return this.dispatchEvent("resetExclude", { id, exclude });
+  }
+
+  resetMatch(id: number, match: string[] | undefined) {
+    return this.dispatchEvent("resetMatch", { id, match });
+  }
+
+  updateCheckUpdateUrl(id: number, url: string) {
+    return this.dispatchEvent("updateCheckUpdateUrl", { id, url });
   }
 }
